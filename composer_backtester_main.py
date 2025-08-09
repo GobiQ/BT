@@ -450,6 +450,21 @@ class ComposerBacktester:
         """Calculate momentum indicator"""
         return prices / prices.shift(window) - 1
     
+    def _safe_date_format(self, date_obj) -> str:
+        """Safely format a date object to string, handling various types"""
+        try:
+            if hasattr(date_obj, 'strftime'):
+                return date_obj.strftime('%Y-%m-%d')
+            elif pd.api.types.is_datetime64_any_dtype(date_obj):
+                return pd.to_datetime(date_obj).strftime('%Y-%m-%d')
+            elif isinstance(date_obj, str):
+                # Try to parse and format
+                return pd.to_datetime(date_obj).strftime('%Y-%m-%d')
+            else:
+                return str(date_obj)
+        except Exception:
+            return str(date_obj)
+    
     def get_indicator_value(self, symbol: str, indicator: str, window: int, date: pd.Timestamp) -> float:
         """Get indicator value for a symbol at a specific date"""
         # Ensure window is an integer
@@ -1180,6 +1195,21 @@ def compare_allocations(inhouse_results: pd.DataFrame, composer_allocations: pd.
                        composer_tickers: List[str], start_date, end_date) -> pd.DataFrame:
     """Compare in-house backtest allocations with Composer allocations"""
     
+    # Helper function to safely extract date from various date types
+    def safe_extract_date(date_obj):
+        """Safely extract date from various date types"""
+        try:
+            if hasattr(date_obj, 'date'):
+                return date_obj.date()
+            elif pd.api.types.is_datetime64_any_dtype(date_obj):
+                return pd.to_datetime(date_obj).date()
+            elif isinstance(date_obj, str):
+                return pd.to_datetime(date_obj).date()
+            else:
+                return date_obj
+        except Exception:
+            return date_obj
+    
     # Convert dates to datetime for comparison
     start_dt = pd.Timestamp(start_date)
     end_dt = pd.Timestamp(end_date)
@@ -1205,16 +1235,16 @@ def compare_allocations(inhouse_results: pd.DataFrame, composer_allocations: pd.
     # Create comparison dataframe
     comparison_data = []
     
-    # Get common dates
-    inhouse_dates = set(inhouse_results['Date'].dt.date)
+    # Get common dates - safely handle date extraction
+    inhouse_dates = set(inhouse_results['Date'].apply(safe_extract_date))
     composer_dates = set(composer_filtered.index.date)
     common_dates = sorted(inhouse_dates.intersection(composer_dates))
     
     st.info(f"📊 Comparing {len(common_dates)} common trading days")
     
     for date in common_dates:
-        # Get InHouse data for this date
-        inhouse_row = inhouse_results[inhouse_results['Date'].dt.date == date].iloc[0]
+        # Get InHouse data for this date - safely handle date comparison
+        inhouse_row = inhouse_results[inhouse_results['Date'].apply(safe_extract_date) == date].iloc[0]
         
         # Get Composer data for this date
         composer_date = pd.Timestamp(date)
@@ -1366,16 +1396,21 @@ def display_comparison_results(comparison_results: pd.DataFrame, inhouse_results
     display_df['Asset_Selection_Match'] = display_df['Asset_Selection_Match'].apply(lambda x: f"{x*100:.1f}%")
     
     # Safely convert Date column to datetime if needed, then extract date
-    try:
-        if pd.api.types.is_datetime64_any_dtype(display_df['Date']):
-            display_df['Date'] = display_df['Date'].dt.date
-        else:
-            # Convert string dates to datetime first
-            display_df['Date'] = pd.to_datetime(display_df['Date']).dt.date
-    except Exception as e:
-        # Fallback: just convert to string representation
-        display_df['Date'] = display_df['Date'].astype(str)
-        st.warning(f"⚠️ Date conversion issue: {e}")
+    def safe_extract_date(date_obj):
+        """Safely extract date from various date types"""
+        try:
+            if hasattr(date_obj, 'date'):
+                return date_obj.date()
+            elif pd.api.types.is_datetime64_any_dtype(date_obj):
+                return pd.to_datetime(date_obj).date()
+            elif isinstance(date_obj, str):
+                return pd.to_datetime(date_obj).date()
+            else:
+                return date_obj
+        except Exception:
+            return date_obj
+    
+    display_df['Date'] = display_df['Date'].apply(safe_extract_date)
     
     st.dataframe(display_df, use_container_width=True)
     
@@ -1469,6 +1504,22 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
     
     st.subheader("🔧 Comparison Output Files")
     
+    # Helper function to safely format dates
+    def safe_date_format(date_obj) -> str:
+        """Safely format a date object to string, handling various types"""
+        try:
+            if hasattr(date_obj, 'strftime'):
+                return date_obj.strftime('%Y-%m-%d')
+            elif pd.api.types.is_datetime64_any_dtype(date_obj):
+                return pd.to_datetime(date_obj).strftime('%Y-%m-%d')
+            elif isinstance(date_obj, str):
+                # Try to parse and format
+                return pd.to_datetime(date_obj).strftime('%Y-%m-%d')
+            else:
+                return str(date_obj)
+        except Exception:
+            return str(date_obj)
+    
     # Create comprehensive debug data
     # Convert composer allocations to handle Timestamp keys properly
     composer_allocations_dict = {}
@@ -1525,10 +1576,10 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
             'date_alignment': '✅ Aligned' if pd.Timestamp(start_date) >= pd.Timestamp(composer_data['start_date']) and pd.Timestamp(end_date) <= pd.Timestamp(composer_data['end_date']) else '⚠️ Extended beyond available data'
         },
         'daily_comparison': comparison_results.copy().assign(
-            Date=lambda x: x['Date'].dt.strftime('%Y-%m-%d') if hasattr(x['Date'].iloc[0], 'strftime') else x['Date']
+            Date=lambda x: safe_date_format(x['Date'])
         ).to_dict('records'),
         'inhouse_backtest': inhouse_results.copy().assign(
-            Date=lambda x: x['Date'].dt.strftime('%Y-%m-%d') if hasattr(x['Date'].iloc[0], 'strftime') else x['Date']
+            Date=lambda x: safe_date_format(x['Date'])
         ).to_dict('records'),
         'composer_allocations': composer_allocations_dict,
         'strategy_config': strategy_data,
@@ -1606,7 +1657,7 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
     
     # Create a more readable CSV version for daily comparison
     daily_csv = comparison_results.copy()
-    daily_csv['Date'] = daily_csv['Date'].dt.strftime('%Y-%m-%d')
+    daily_csv['Date'] = daily_csv['Date'].apply(lambda x: safe_date_format(x))
     daily_csv['Allocation_Differences'] = daily_csv['Allocation_Differences'].apply(lambda x: str(x))
     
     # Debug: Show CSV data structure
@@ -1727,7 +1778,7 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
             'Date_Alignment_Status': '✅ Aligned' if pd.Timestamp(start_date) >= pd.Timestamp(composer_data['start_date']) and pd.Timestamp(end_date) <= pd.Timestamp(composer_data['end_date']) else '⚠️ Extended beyond available data'
         },
         'Daily_Summary': comparison_results[['Date', 'Asset_Selection_Match', 'Rebalanced', 'InHouse_Num_Assets', 'Composer_Num_Assets']].copy().assign(
-            Date=lambda x: x['Date'].dt.strftime('%Y-%m-%d') if hasattr(x['Date'].iloc[0], 'strftime') else x['Date']
+            Date=lambda x: safe_date_format(x['Date'])
         ).to_dict('records'),
         'Ticker_Summary': ticker_comparison_df.groupby('Ticker').agg({
             'Selection_Match': 'mean',
