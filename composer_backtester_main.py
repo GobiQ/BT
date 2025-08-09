@@ -308,8 +308,9 @@ class ComposerBacktester:
             return {}
             
         # CRITICAL FIX: Increase buffer for technical indicators
-        # Strategy uses 200-day MA, so we need at least 250 days of historical data
-        buffer_days = 250  # Sufficient for 200-day MA, RSI, and other indicators
+        # Strategy uses 200-day MA, so we need at least 400 days of historical data
+        # 200 days for the MA calculation + 200 days buffer for stability
+        buffer_days = 400  # Sufficient for 200-day MA, RSI, and other indicators
         start_with_buffer = (pd.Timestamp(start_date) - timedelta(days=buffer_days)).strftime('%Y-%m-%d')
         
         st.info(f"Downloading data from {start_with_buffer} to {end_date} (with {buffer_days} day buffer for indicators)")
@@ -325,8 +326,8 @@ class ComposerBacktester:
                     ticker_data = ticker_data.fillna(method='ffill').fillna(method='bfill')
                     
                     # Ensure we have enough data for indicators
-                    if len(ticker_data) < 250:
-                        st.warning(f"Warning: {symbol} has only {len(ticker_data)} data points (minimum 250 recommended for 200-day MA)")
+                    if len(ticker_data) < 400:
+                        st.warning(f"Warning: {symbol} has only {len(ticker_data)} data points (minimum 400 recommended for 200-day MA)")
                     
                     data[symbol] = ticker_data
                 else:
@@ -2663,7 +2664,8 @@ def main():
         # Date range selection
         col1, col2 = st.columns(2)
         with col1:
-            start_date = st.date_input("Start Date", datetime.now() - timedelta(days=365))
+            start_date = st.date_input("Start Date", datetime.now() - timedelta(days=730), 
+                                     help="Select start date. For 200-day MA strategies, ensure you have at least 2+ years of data")
         with col2:
             end_date = st.date_input("End Date", datetime.now())
         
