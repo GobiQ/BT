@@ -995,6 +995,10 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
         st.warning(f"⚠️ Potential serialization issue detected: {serialization_issue}")
         st.info("The system will attempt to handle this automatically, but you may see warnings.")
     
+    # Debug: Show debug data structure
+    st.info(f"🔍 Debug: Debug data keys: {list(debug_data.keys())}")
+    st.info(f"🔍 Debug: Debug data structure preview: {str(debug_data)[:500]}...")
+    
     # Convert to JSON for download with custom encoder to handle any remaining Timestamp objects
     def json_serializer(obj):
         if hasattr(obj, 'strftime'):
@@ -1016,6 +1020,7 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
     
     try:
         debug_json = json.dumps(debug_data, indent=2, default=json_serializer)
+        st.info(f"🔍 Debug: JSON serialization successful, length: {len(debug_json)}")
     except Exception as e:
         st.error(f"Error serializing debug data to JSON: {str(e)}")
         st.error("This usually indicates there are still non-serializable objects in the data.")
@@ -1058,8 +1063,46 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
     daily_csv['Date'] = daily_csv['Date'].dt.strftime('%Y-%m-%d')
     daily_csv['Allocation_Differences'] = daily_csv['Allocation_Differences'].apply(lambda x: str(x))
     
+    # Debug: Show CSV data structure
+    st.info(f"🔍 Debug: Daily CSV shape: {daily_csv.shape}")
+    st.info(f"🔍 Debug: Daily CSV columns: {list(daily_csv.columns)}")
+    
     # Create a comprehensive daily ticker comparison file
     daily_ticker_comparison = []
+    
+    # Safety check: ensure composer_data has required keys
+    if not composer_data or 'tickers' not in composer_data or 'allocations_df' not in composer_data:
+        st.error("❌ Composer data is missing required fields (tickers or allocations_df)")
+        st.error(f"Available keys: {list(composer_data.keys()) if composer_data else 'None'}")
+        return
+    
+    # Debug: Log the structure of the data
+    st.info(f"🔍 Debug: Composer data has {len(composer_data['tickers'])} tickers")
+    st.info(f"🔍 Debug: Inhouse results has {len(inhouse_results)} rows")
+    st.info(f"🔍 Debug: Comparison results has {len(comparison_results)} rows")
+    st.info(f"🔍 Debug: Inhouse results columns: {list(inhouse_results.columns)}")
+    st.info(f"🔍 Debug: Comparison results columns: {list(comparison_results.columns)}")
+    st.info(f"🔍 Debug: Composer tickers: {composer_data['tickers'][:10]}...")  # Show first 10 tickers
+    st.info(f"🔍 Debug: Composer allocations_df shape: {composer_data['allocations_df'].shape}")
+    st.info(f"🔍 Debug: Composer allocations_df index range: {composer_data['allocations_df'].index.min()} to {composer_data['allocations_df'].index.max()}")
+    
+    # Create a mapping from date to inhouse holdings for easier access
+    inhouse_holdings_map = {}
+    for _, row in inhouse_results.iterrows():
+        date_str = row['Date'].strftime('%Y-%m-%d')
+        inhouse_holdings_map[date_str] = row['Holdings'] if 'Holdings' in row else {}
+    
+    # Debug: Show sample of inhouse holdings map
+    if inhouse_holdings_map:
+        sample_dates = list(inhouse_holdings_map.keys())[:3]
+        st.info(f"🔍 Debug: Sample inhouse holdings dates: {sample_dates}")
+        for date in sample_dates:
+            st.info(f"🔍 Debug: Holdings for {date}: {inhouse_holdings_map[date]}")
+    
+    # Debug: Show sample of comparison results
+    if len(comparison_results) > 0:
+        st.info(f"🔍 Debug: First comparison result row: {comparison_results.iloc[0].to_dict()}")
+    
     for _, row in comparison_results.iterrows():
         date_str = row['Date'].strftime('%Y-%m-%d')
         
@@ -1068,14 +1111,38 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
         composer_tickers = set(row['Composer_Assets'].split(', ')) if row['Composer_Assets'] else set()
         all_tickers = inhouse_tickers | composer_tickers
         
+        # Get inhouse holdings for this date
+        inhouse_holdings = inhouse_holdings_map.get(date_str, {})
+        
+        # Debug: Show what we're working with for this date
+        if len(daily_ticker_comparison) < 5:  # Only show first few for debugging
+            st.info(f"🔍 Debug: Processing date {date_str}")
+            st.info(f"🔍 Debug: Inhouse tickers: {inhouse_tickers}")
+            st.info(f"🔍 Debug: Composer tickers: {composer_tickers}")
+            st.info(f"🔍 Debug: Inhouse holdings: {inhouse_holdings}")
+        
         # Create a row for each ticker
         for ticker in sorted(all_tickers):
-            inhouse_weight = row['Holdings'].get(ticker, 0) if row['InHouse_Assets'] != 'None' else 0
+            # Get inhouse weight from the holdings map
+            inhouse_weight = inhouse_holdings.get(ticker, 0) if inhouse_holdings else 0
+            
             composer_weight = 0
             if ticker in composer_data['tickers']:
-                composer_row = composer_data['allocations_df'].loc[row['Date']] if row['Date'] in composer_data['allocations_df'].index else None
-                if composer_row is not None and ticker in composer_row:
-                    composer_weight = composer_row[ticker] / 100  # Convert % to decimal
+                try:
+                    # Try to get composer allocation for this date and ticker
+                    if row['Date'] in composer_data['allocations_df'].index:
+                        composer_row = composer_data['allocations_df'].loc[row['Date']]
+                        if ticker in composer_row:
+                            composer_weight = composer_row[ticker] / 100  # Convert % to decimal
+                        
+                        # Debug: Show composer data for first few iterations
+                        if len(daily_ticker_comparison) < 5:
+                            st.info(f"🔍 Debug: Composer row for {date_str}: {composer_row.to_dict() if hasattr(composer_row, 'to_dict') else composer_row}")
+                except (KeyError, IndexError) as e:
+                    # If there's any issue accessing the data, just use 0
+                    if len(daily_ticker_comparison) < 5:
+                        st.info(f"🔍 Debug: Error accessing composer data for {date_str}: {e}")
+                    composer_weight = 0
             
             daily_ticker_comparison.append({
                 'Date': date_str,
@@ -1091,6 +1158,12 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
             })
     
     ticker_comparison_df = pd.DataFrame(daily_ticker_comparison)
+    
+    # Debug: Show sample of ticker comparison data
+    if len(ticker_comparison_df) > 0:
+        st.info(f"🔍 Debug: Ticker comparison DataFrame shape: {ticker_comparison_df.shape}")
+        st.info(f"🔍 Debug: Ticker comparison columns: {list(ticker_comparison_df.columns)}")
+        st.info(f"🔍 Debug: First few ticker comparison rows: {ticker_comparison_df.head(3).to_dict('records')}")
     
     # Create a summary comparison file
     summary_comparison = {
@@ -1118,6 +1191,10 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
         }).reset_index().to_dict('records')
     }
     
+    # Debug: Show summary comparison structure
+    st.info(f"🔍 Debug: Summary comparison keys: {list(summary_comparison.keys())}")
+    st.info(f"🔍 Debug: Summary comparison structure: {summary_comparison}")
+    
     # Download options - ENHANCED with summary file
     col1, col2, col3, col4 = st.columns(4)
     
@@ -1132,6 +1209,7 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
     
     with col2:
         csv_data = daily_csv.to_csv(index=False)
+        st.info(f"🔍 Debug: Daily CSV data length: {len(csv_data)}")
         st.download_button(
             label="📥 Download Daily Comparison CSV",
             data=csv_data,
@@ -1142,6 +1220,7 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
     
     with col3:
         ticker_csv = ticker_comparison_df.to_csv(index=False)
+        st.info(f"🔍 Debug: Ticker CSV data length: {len(ticker_csv)}")
         st.download_button(
             label="📥 Download Ticker Comparison CSV",
             data=ticker_csv,
@@ -1153,6 +1232,7 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
     with col4:
         try:
             summary_json = json.dumps(summary_comparison, indent=2, default=json_serializer)
+            st.info(f"🔍 Debug: Summary JSON serialization successful, length: {len(summary_json)}")
         except Exception as e:
             st.error(f"Error serializing summary data to JSON: {str(e)}")
             # Fallback: create a minimal summary
