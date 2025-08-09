@@ -275,7 +275,9 @@ class ComposerBacktester:
             return (date.month != self.last_rebalance_date.month or 
                    date.year != self.last_rebalance_date.year)
         elif self.rebalance_frequency == 'none':
-            return False
+            # For "none", we still need to check if allocation should change
+            # This allows the strategy to respond to conditions while minimizing turnover
+            return True
         
         return True
     
@@ -363,6 +365,8 @@ class ComposerBacktester:
     def get_indicator_value(self, symbol: str, indicator: str, window: int, date: pd.Timestamp) -> float:
         """Get indicator value for a symbol at a specific date"""
         if symbol not in self.data:
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"Symbol {symbol} not found in data")
             return np.nan
             
         df = self.data[symbol]
@@ -389,6 +393,8 @@ class ComposerBacktester:
             elif indicator == 'max-drawdown':
                 values = self.calculate_max_drawdown(prices, window)
             else:
+                if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                    st.write(f"Unknown indicator: {indicator}")
                 return np.nan
             
             # Get the scalar value at the specific date
@@ -409,7 +415,7 @@ class ComposerBacktester:
     
     def evaluate_condition(self, condition: Dict[str, Any], date: pd.Timestamp) -> bool:
         """Evaluate a condition node"""
-        if condition['step'] != 'if-child':
+        if condition.get('step') != 'if-child':
             return False
             
         # Skip else conditions in this function
@@ -445,6 +451,8 @@ class ComposerBacktester:
         
         # Ensure we have scalar values
         if pd.isna(lhs_value) or pd.isna(rhs_value):
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"Debug: Missing data - LHS: {lhs_value}, RHS: {rhs_value}")
             return False
         
         # Convert to float to ensure scalar comparison
@@ -539,12 +547,16 @@ class ComposerBacktester:
                         # Evaluate condition
                         if self.evaluate_condition(child, date):
                             result = self.evaluate_children(child.get('children', []), date)
-                            if result:  # Only return if we got assets
-                                return result
+                            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                                st.write(f"IF condition TRUE, selected: {result}")
+                            return result
             
             # If no condition matched and we have an else, execute it
             if else_child:
-                return self.evaluate_children(else_child.get('children', []), date)
+                result = self.evaluate_children(else_child.get('children', []), date)
+                if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                    st.write(f"ELSE condition executed, selected: {result}")
+                return result
             
             return []
         
@@ -554,7 +566,10 @@ class ComposerBacktester:
             for child in children:
                 if child.get('step') == 'asset':
                     assets.append(child)
-            return self.apply_filter(assets, node, date)
+            result = self.apply_filter(assets, node, date)
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"Filter applied, selected: {result}")
+            return result
         
         elif step in ['wt-cash-equal', 'wt-cash-specified', 'wt-inverse-vol', 'group']:
             return self.evaluate_children(node.get('children', []), date)
@@ -638,13 +653,11 @@ class ComposerBacktester:
         self.current_holdings = {}
         self.last_rebalance_date = None
         
-        progress_bar = st.progress(0)
-        
         # Add debug container
+        debug_container = None
         if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
             debug_container = st.container()
-        else:
-            debug_container = None
+            st.session_state.debug_mode = True  # Ensure it's set
         
         for i, date in enumerate(trading_dates):
             self.current_date = date
@@ -658,6 +671,10 @@ class ComposerBacktester:
             
             if should_rebalance:
                 # Evaluate strategy for this date to get new allocation
+                if debug_container and i < 10:
+                    with debug_container:
+                        st.write(f"Evaluating strategy for {date.date()}...")
+                
                 selected_assets = self.evaluate_node(strategy, date)
                 
                 # Create new holdings (equal weight)
@@ -672,8 +689,17 @@ class ComposerBacktester:
                         st.write(f"Rebalancing to: {selected_assets}")
                         st.write(f"New holdings: {new_holdings}")
                 
-                self.current_holdings = new_holdings
-                self.last_rebalance_date = date
+                # Only update holdings if they actually changed
+                if new_holdings != self.current_holdings:
+                    self.current_holdings = new_holdings
+                    self.last_rebalance_date = date
+                    if debug_container and i < 10:
+                        with debug_container:
+                            st.write("✅ Holdings updated")
+                else:
+                    if debug_container and i < 10:
+                        with debug_container:
+                            st.write("⚪ Holdings unchanged")
             
             # Calculate portfolio return since last day
             if i > 0:
@@ -783,8 +809,7 @@ def main():
         
         # Debug mode
         debug_mode = st.checkbox("Debug Mode", help="Show detailed condition evaluation")
-        if debug_mode:
-            st.session_state.debug_mode = True
+        st.session_state.debug_mode = debug_mode
     
     # Display strategy information and run backtest
     if data_source == "Upload JSON File" and strategy_data is not None:
