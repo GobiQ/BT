@@ -3123,6 +3123,119 @@ def main():
                     st.error(f"Error during diagnosis: {str(e)}")
                     import traceback
                     st.error(f"Detailed error: {traceback.format_exc()}")
+            
+            # Add specific asset diagnosis feature
+            st.markdown("---")
+            st.subheader("🎯 Specific Asset Diagnosis")
+            st.markdown("Diagnose why a specific asset wasn't selected on a specific date")
+            
+            # Date and asset selection
+            col_date, col_asset = st.columns(2)
+            with col_date:
+                diagnosis_date = st.date_input(
+                    "Select Date to Diagnose",
+                    value=start_date,
+                    min_value=start_date,
+                    max_value=end_date,
+                    help="Choose a date where you want to diagnose asset selection"
+                )
+            
+            with col_asset:
+                expected_assets = ["TQQQ", "UVXY", "TECL", "SOXL", "SQQQ", "BSV"]
+                expected_asset = st.selectbox(
+                    "Expected Asset",
+                    options=expected_assets,
+                    help="Select the asset that should have been chosen on this date"
+                )
+            
+            if st.button("🔍 Diagnose Asset Selection", type="primary", use_container_width=True):
+                if not HAS_YFINANCE:
+                    st.error("Cannot run diagnosis without yfinance. Please install required dependencies.")
+                    st.code("pip install yfinance plotly")
+                    return
+                
+                try:
+                    with st.spinner(f"🔍 Diagnosing why {expected_asset} wasn't selected on {diagnosis_date}..."):
+                        # Create backtester instance
+                        backtester = ComposerBacktester()
+                        backtester.cash = initial_capital
+                        
+                        # Download data for the specific date range
+                        symbols = list(strategy_data.get('symbols', []))
+                        if not symbols:
+                            # Extract symbols from strategy if not explicitly defined
+                            symbols = backtester.extract_all_symbols(strategy_data)
+                        
+                        # Download data for a window around the diagnosis date
+                        start_window = (pd.Timestamp(diagnosis_date) - pd.Timedelta(days=30)).strftime('%Y-%m-%d')
+                        end_window = (pd.Timestamp(diagnosis_date) + pd.Timedelta(days=30)).strftime('%Y-%m-%d')
+                        backtester.download_data(symbols, start_window, end_window)
+                        
+                        # Run the diagnosis
+                        diagnosis = backtester.diagnose_strategy_failure(
+                            strategy=strategy_data,
+                            date=pd.Timestamp(diagnosis_date),
+                            expected_asset=expected_asset
+                        )
+                        
+                        # Display the diagnosis results
+                        st.subheader(f"🔍 Diagnosis Results for {expected_asset} on {diagnosis_date}")
+                        
+                        # Show actual vs expected selection
+                        col_expected, col_actual = st.columns(2)
+                        with col_expected:
+                            st.metric("Expected Asset", expected_asset)
+                        with col_actual:
+                            actual_selection = diagnosis.get('actual_selection', [])
+                            if actual_selection:
+                                st.metric("Actually Selected", ", ".join(actual_selection))
+                            else:
+                                st.metric("Actually Selected", "None")
+                        
+                        # Show RSI values
+                        if diagnosis.get('rsi_values'):
+                            st.subheader("📊 RSI Values")
+                            rsi_df = pd.DataFrame(diagnosis['rsi_values']).T
+                            st.dataframe(rsi_df, use_container_width=True)
+                        
+                        # Show Moving Average analysis
+                        if diagnosis.get('ma_values'):
+                            st.subheader("📈 Moving Average Analysis")
+                            ma_df = pd.DataFrame(diagnosis['ma_values']).T
+                            st.dataframe(ma_df, use_container_width=True)
+                        
+                        # Show condition evaluations
+                        if diagnosis.get('condition_evaluations'):
+                            st.subheader("✅ Condition Evaluations")
+                            for condition in diagnosis['condition_evaluations']:
+                                status = "✅" if condition.get('met') else "❌"
+                                st.write(f"{status} {condition['condition']}")
+                                if 'value' in condition:
+                                    st.write(f"   Value: {condition['value']}")
+                                if 'threshold' in condition:
+                                    st.write(f"   Threshold: {condition['threshold']}")
+                        
+                        # Show filter results
+                        if diagnosis.get('filter_results'):
+                            st.subheader("🔍 Filter Results")
+                            st.json(diagnosis['filter_results'])
+                        
+                        # Show identified issues
+                        if diagnosis.get('issues'):
+                            st.subheader("🚨 Issues Identified")
+                            for issue in diagnosis['issues']:
+                                st.error(f"• {issue}")
+                        
+                        # Show raw diagnosis data
+                        with st.expander("📋 Raw Diagnosis Data"):
+                            st.json(diagnosis)
+                        
+                        st.success(f"🔍 Asset diagnosis completed for {expected_asset} on {diagnosis_date}")
+                        
+                except Exception as e:
+                    st.error(f"Error during asset diagnosis: {str(e)}")
+                    import traceback
+                    st.error(f"Detailed error: {traceback.format_exc()}")
     
     elif has_json:
         st.subheader("🚀 Run In-House Backtest")
