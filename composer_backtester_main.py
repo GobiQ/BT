@@ -935,7 +935,7 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
             'total_days': len(comparison_results),
             'perfect_matches': (comparison_results['Asset_Selection_Match'] == 1.0).sum(),
             'avg_match_rate': comparison_results['Asset_Selection_Match'].mean(),
-            'date_alignment': '✅ Aligned' if start_date >= pd.Timestamp(composer_data['start_date']) and end_date <= pd.Timestamp(composer_data['end_date']) else '⚠️ Extended beyond available data'
+            'date_alignment': '✅ Aligned' if pd.Timestamp(start_date) >= pd.Timestamp(composer_data['start_date']) and pd.Timestamp(end_date) <= pd.Timestamp(composer_data['end_date']) else '⚠️ Extended beyond available data'
         },
         'daily_comparison': comparison_results.to_dict('records'),
         'inhouse_backtest': inhouse_results.to_dict('records'),
@@ -999,7 +999,7 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
             'Strategy_Name': strategy_data.get('description', 'Unknown'),
             'Composer_Symphony': composer_data['symphony_name'],
             'Initial_Capital': initial_capital,
-            'Date_Alignment_Status': '✅ Aligned' if start_date >= pd.Timestamp(composer_data['start_date']) and end_date <= pd.Timestamp(composer_data['end_date']) else '⚠️ Extended beyond available data'
+            'Date_Alignment_Status': '✅ Aligned' if pd.Timestamp(start_date) >= pd.Timestamp(composer_data['start_date']) and pd.Timestamp(end_date) <= pd.Timestamp(composer_data['end_date']) else '⚠️ Extended beyond available data'
         },
         'Daily_Summary': comparison_results[['Date', 'Asset_Selection_Match', 'Rebalanced', 'InHouse_Num_Assets', 'Composer_Num_Assets']].to_dict('records'),
         'Ticker_Summary': ticker_comparison_df.groupby('Ticker').agg({
@@ -2053,7 +2053,7 @@ def display_backtest_results(results, initial_capital, start_date, end_date):
         
         final_value = results['Portfolio_Value'].iloc[-1]
         total_return = (final_value - initial_capital) / initial_capital * 100
-        days_elapsed = (end_date - start_date).days
+        days_elapsed = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days
         years_elapsed = days_elapsed / 365.25
         
         # Calculate more accurate metrics
