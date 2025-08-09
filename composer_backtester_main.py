@@ -1016,19 +1016,42 @@ class ComposerBacktester:
             # Check for price anomalies
             if 'Close' in df.columns:
                 close_prices = df['Close']
-                # Ensure close_prices is numeric and handle any NaN values
-                close_prices = pd.to_numeric(close_prices, errors='coerce')
-                non_positive_mask = close_prices <= 0
-                if non_positive_mask.any():
-                    st.error(f"❌ {symbol}: Found non-positive close prices")
-                    validation_passed = False
                 
-                # Check for extreme price movements (>50% in one day)
-                daily_returns = close_prices.pct_change().abs()
-                extreme_moves = daily_returns > 0.5
-                if extreme_moves.any():
-                    extreme_dates = daily_returns[extreme_moves].index
-                    st.warning(f"⚠️ {symbol}: Extreme price movements on {len(extreme_dates)} days")
+                # Debug: Check the type and structure of close_prices
+                if not isinstance(close_prices, (pd.Series, pd.DataFrame)):
+                    st.warning(f"⚠️ {symbol}: Close column is not a Series/DataFrame, type: {type(close_prices)}")
+                    continue
+                
+                # If it's a DataFrame, take the first column
+                if isinstance(close_prices, pd.DataFrame):
+                    if len(close_prices.columns) > 0:
+                        close_prices = close_prices.iloc[:, 0]
+                    else:
+                        st.warning(f"⚠️ {symbol}: Close DataFrame has no columns")
+                        continue
+                
+                # Ensure close_prices is numeric and handle any NaN values
+                try:
+                    close_prices = pd.to_numeric(close_prices, errors='coerce')
+                    if close_prices is None or len(close_prices) == 0:
+                        st.warning(f"⚠️ {symbol}: No valid close price data after conversion")
+                        continue
+                        
+                    non_positive_mask = close_prices <= 0
+                    if non_positive_mask.any():
+                        st.error(f"❌ {symbol}: Found non-positive close prices")
+                        validation_passed = False
+                    
+                    # Check for extreme price movements (>50% in one day)
+                    daily_returns = close_prices.pct_change().abs()
+                    extreme_moves = daily_returns > 0.5
+                    if extreme_moves.any():
+                        extreme_dates = daily_returns[extreme_moves].index
+                        st.warning(f"⚠️ {symbol}: Extreme price movements on {len(extreme_dates)} days")
+                        
+                except Exception as e:
+                    st.error(f"❌ {symbol}: Error processing close prices: {str(e)}")
+                    validation_passed = False
         
         if validation_passed:
             st.success("✅ Data validation passed")
