@@ -484,12 +484,9 @@ class ComposerBacktester:
     def get_indicator_value(self, symbol: str, indicator: str, window: int, date: pd.Timestamp) -> float:
         """Get indicator value for a symbol at a specific date with improved data handling"""
         
-        # CRITICAL FIX: Composer uses 11-day RSI instead of 10-day for TQQQ
-        # This ensures the RSI calculation itself uses the correct window
-        if indicator == 'relative-strength-index' and symbol == 'TQQQ' and window == 10:
-            window = 11  # Use 11-day RSI to match Composer
-            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                st.write(f"🔧 FIXED: Using 11-day RSI for TQQQ instead of 10-day to match Composer")
+        # CRITICAL FIX: Use exact RSI windows as specified in the strategy
+        # The holygrail strategy uses RSI(10) for TQQQ, not RSI(11)
+        # This ensures we match Composer's behavior exactly
         
         # Ensure window is valid
         try:
@@ -497,7 +494,7 @@ class ComposerBacktester:
             window = max(1, window)  # Ensure positive window
         except (ValueError, TypeError):
             window = 14
-            
+        
         if symbol not in self.data:
             return np.nan
             
@@ -585,7 +582,7 @@ class ComposerBacktester:
             return np.nan
     
     def evaluate_condition(self, condition: Dict[str, Any], date: pd.Timestamp) -> bool:
-        """Evaluate a condition node"""
+        """Evaluate a condition node with enhanced accuracy to match Composer"""
         if condition.get('step') != 'if-child':
             return False
             
@@ -599,13 +596,9 @@ class ComposerBacktester:
         rhs_window_days = condition.get('rhs-window-days')
         rhs_fixed_value = condition.get('rhs-fixed-value?', False)
         
-        # CRITICAL FIX: Composer uses 11-day RSI instead of 10-day for TQQQ
-        # This is why UVXY was being incorrectly selected
-        if lhs_fn == 'relative-strength-index' and lhs_val == 'TQQQ' and lhs_window_days == '10':
-            lhs_window_days = '11'  # Use 11-day RSI to match Composer
-            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                st.write(f"🔧 FIXED: Using 11-day RSI for TQQQ instead of 10-day to match Composer")
-        
+        # CRITICAL FIX: Composer uses exact RSI windows, not approximations
+        # The holygrail strategy uses RSI(10) for TQQQ, not RSI(11)
+        # This was causing UVXY to be incorrectly selected
         if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
             st.write(f"🔍 Evaluating condition: {lhs_fn}({lhs_val}, {lhs_window_days}) {comparator} {rhs_fn}({rhs_val}, {rhs_window_days})")
         
@@ -624,7 +617,7 @@ class ComposerBacktester:
             else:
                 rhs_value = self.get_indicator_value(rhs_val, rhs_fn, rhs_window_days, date)
             
-            # CRITICAL FIX: Enhanced debugging for key conditions
+            # CRITICAL FIX: Enhanced debugging for key conditions that cause mismatches
             if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
                 if lhs_val == 'TQQQ' and rhs_val == 'TQQQ' and lhs_fn == 'current-price' and rhs_fn == 'moving-average-price':
                     st.write(f"🎯 KEY CONDITION: TQQQ Price ({lhs_value}) {comparator} TQQQ {rhs_window_days}-day MA ({rhs_value})")
@@ -632,6 +625,12 @@ class ComposerBacktester:
                         st.error(f"❌ Missing data: TQQQ Price={lhs_value}, TQQQ {rhs_window_days}-day MA={rhs_value}")
                     else:
                         st.write(f"✅ Data available: TQQQ Price={lhs_value:.2f}, TQQQ {rhs_window_days}-day MA={rhs_value:.2f}")
+                elif lhs_fn == 'relative-strength-index' and lhs_val == 'TQQQ':
+                    st.write(f"🎯 RSI CONDITION: TQQQ RSI({lhs_window_days}) = {lhs_value} {comparator} {rhs_val}")
+                    if pd.isna(lhs_value):
+                        st.error(f"❌ Missing RSI data for TQQQ")
+                    else:
+                        st.write(f"✅ RSI data available: {lhs_value:.2f}")
                 else:
                     st.write(f"📊 Condition values: LHS={lhs_value}, RHS={rhs_value}")
             
@@ -668,7 +667,7 @@ class ComposerBacktester:
             return False
     
     def apply_filter(self, assets: List[Dict[str, Any]], filter_config: Dict[str, Any], date: pd.Timestamp) -> List[str]:
-        """Apply filter to select assets"""
+        """Apply filter to select assets with enhanced accuracy"""
         # CRITICAL FIX: Handle case where filter_config is not a filter
         if filter_config.get('step') != 'filter':
             # Return all asset tickers if this isn't a filter
@@ -683,6 +682,9 @@ class ComposerBacktester:
         sort_window = filter_config.get('sort-by-window-days', 14)
         select_fn = filter_config.get('select-fn', 'top')
         select_n = int(filter_config.get('select-n', 1))
+        
+        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+            st.write(f"🔍 Applying filter: {sort_fn}({sort_window}) - {select_fn}({select_n})")
         
         # CRITICAL FIX: If no sort function specified, return all assets
         if not sort_fn:
@@ -699,9 +701,13 @@ class ComposerBacktester:
                 value = self.get_indicator_value(ticker, sort_fn, sort_window, date)
                 if not pd.isna(value) and value is not None:
                     asset_values.append((ticker, float(value)))
+                    if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                        st.write(f"📊 {ticker}: {sort_fn}({sort_window}) = {value:.2f}")
                 else:
                     # CRITICAL FIX: If indicator value is not available, use a default value
                     asset_values.append((ticker, 0.0))
+                    if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                        st.write(f"⚠️ {ticker}: {sort_fn}({sort_window}) = NaN, using 0.0")
             except Exception as e:
                 st.warning(f"Error getting indicator value for {ticker}: {e}")
                 # CRITICAL FIX: Include asset even if indicator fails
@@ -712,10 +718,12 @@ class ComposerBacktester:
             st.warning("No valid indicator values, returning all assets")
             return [asset['ticker'] for asset in assets if 'ticker' in asset]
         
-        # Sort assets
+        # Sort assets based on the indicator values
         if select_fn == 'top':
+            # For RSI, higher values are better (stronger momentum)
             asset_values.sort(key=lambda x: x[1], reverse=True)
         elif select_fn == 'bottom':
+            # For RSI, lower values are better (oversold conditions)
             asset_values.sort(key=lambda x: x[1])
         else:
             # CRITICAL FIX: Handle unknown select function
@@ -727,7 +735,8 @@ class ComposerBacktester:
         selected = [ticker for ticker, _ in asset_values[:select_n]]
         
         if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-            st.write(f"Filter: {sort_fn} - {asset_values} → {selected}")
+            st.write(f"🎯 Filter result: {sort_fn} - {asset_values} → {selected}")
+            st.write(f"📈 Selected assets with {sort_fn} values: {[(t, v) for t, v in asset_values[:select_n]]}")
         
         return selected
     
@@ -1590,6 +1599,158 @@ class ComposerBacktester:
         
         # If all else fails, return the original strategy
         return strategy
+
+    def diagnose_strategy_failure(self, strategy: Dict[str, Any], date: pd.Timestamp, expected_asset: str) -> Dict[str, Any]:
+        """Diagnose why strategy failed to select the expected asset on a specific date"""
+        diagnosis = {
+            'date': date,
+            'expected_asset': expected_asset,
+            'actual_selection': None,
+            'condition_evaluations': [],
+            'rsi_values': {},
+            'ma_values': {},
+            'filter_results': {},
+            'issues': []
+        }
+        
+        try:
+            # Get the actual selection
+            actual_selection = self.evaluate_node(strategy, date)
+            diagnosis['actual_selection'] = actual_selection
+            
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"🔍 DIAGNOSIS: Expected {expected_asset}, got {actual_selection}")
+            
+            # Analyze RSI values for key assets
+            key_assets = ['TQQQ', 'UVXY', 'TECL', 'SOXL', 'SQQQ', 'BSV']
+            for asset in key_assets:
+                if asset in self.data:
+                    try:
+                        rsi_10 = self.get_indicator_value(asset, 'relative-strength-index', 10, date)
+                        rsi_20 = self.get_indicator_value(asset, 'relative-strength-index', 20, date)
+                        diagnosis['rsi_values'][asset] = {
+                            'rsi_10': rsi_10,
+                            'rsi_20': rsi_20
+                        }
+                    except Exception as e:
+                        diagnosis['rsi_values'][asset] = {'error': str(e)}
+            
+            # Analyze moving averages
+            for asset in key_assets:
+                if asset in self.data:
+                    try:
+                        ma_20 = self.get_indicator_value(asset, 'moving-average-price', 20, date)
+                        ma_200 = self.get_indicator_value(asset, 'moving-average-price', 200, date)
+                        current_price = self.get_asset_price(asset, date)
+                        diagnosis['ma_values'][asset] = {
+                            'current_price': current_price,
+                            'ma_20': ma_20,
+                            'ma_200': ma_200,
+                            'above_ma_20': current_price > ma_20 if not pd.isna(ma_20) else None,
+                            'above_ma_200': current_price > ma_200 if not pd.isna(ma_200) else None
+                        }
+                    except Exception as e:
+                        diagnosis['ma_values'][asset] = {'error': str(e)}
+            
+            # Check specific conditions from the strategy
+            if expected_asset == 'UVXY':
+                # UVXY is selected when TQQQ RSI > 79
+                tqqq_rsi_10 = diagnosis['rsi_values'].get('TQQQ', {}).get('rsi_10')
+                if tqqq_rsi_10 is not None and not pd.isna(tqqq_rsi_10):
+                    condition_met = tqqq_rsi_10 > 79
+                    diagnosis['condition_evaluations'].append({
+                        'condition': 'TQQQ RSI(10) > 79',
+                        'value': tqqq_rsi_10,
+                        'threshold': 79,
+                        'met': condition_met
+                    })
+                    if not condition_met:
+                        diagnosis['issues'].append(f"TQQQ RSI(10) = {tqqq_rsi_10:.2f} <= 79, UVXY not selected")
+                else:
+                    diagnosis['issues'].append("TQQQ RSI(10) data unavailable")
+            
+            elif expected_asset == 'TECL':
+                # TECL is selected when TQQQ RSI < 31
+                tqqq_rsi_10 = diagnosis['rsi_values'].get('TQQQ', {}).get('rsi_10')
+                if tqqq_rsi_10 is not None and not pd.isna(tqqq_rsi_10):
+                    condition_met = tqqq_rsi_10 < 31
+                    diagnosis['condition_evaluations'].append({
+                        'condition': 'TQQQ RSI(10) < 31',
+                        'value': tqqq_rsi_10,
+                        'threshold': 31,
+                        'met': condition_met
+                    })
+                    if not condition_met:
+                        diagnosis['issues'].append(f"TQQQ RSI(10) = {tqqq_rsi_10:.2f} >= 31, TECL not selected")
+                else:
+                    diagnosis['issues'].append("TQQQ RSI(10) data unavailable")
+            
+            elif expected_asset == 'SOXL':
+                # SOXL is selected when SOXL RSI < 30
+                soxl_rsi_10 = diagnosis['rsi_values'].get('SOXL', {}).get('rsi_10')
+                if soxl_rsi_10 is not None and not pd.isna(soxl_rsi_10):
+                    condition_met = soxl_rsi_10 < 30
+                    diagnosis['condition_evaluations'].append({
+                        'condition': 'SOXL RSI(10) < 30',
+                        'value': soxl_rsi_10,
+                        'threshold': 30,
+                        'met': condition_met
+                    })
+                    if not condition_met:
+                        diagnosis['issues'].append(f"SOXL RSI(10) = {soxl_rsi_10:.2f} >= 30, SOXL not selected")
+                else:
+                    diagnosis['issues'].append("SOXL RSI(10) data unavailable")
+            
+            elif expected_asset == 'BSV':
+                # BSV is selected when TQQQ price < 20-day MA
+                tqqq_analysis = diagnosis['ma_values'].get('TQQQ', {})
+                if 'above_ma_20' in tqqq_analysis and tqqq_analysis['above_ma_20'] is not None:
+                    condition_met = not tqqq_analysis['above_ma_20']  # TQQQ below MA
+                    diagnosis['condition_evaluations'].append({
+                        'condition': 'TQQQ Price < 20-day MA',
+                        'value': tqqq_analysis.get('current_price'),
+                        'ma_value': tqqq_analysis.get('ma_20'),
+                        'met': condition_met
+                    })
+                    if not condition_met:
+                        diagnosis['issues'].append(f"TQQQ above 20-day MA, BSV not selected")
+                else:
+                    diagnosis['issues'].append("TQQQ MA data unavailable")
+            
+            # Check if the issue is with the filter logic
+            if expected_asset in ['SQQQ', 'BSV']:
+                # These are selected by the filter based on RSI
+                diagnosis['filter_results'] = {
+                    'available_assets': ['SQQQ', 'BSV'],
+                    'rsi_values': {
+                        'SQQQ': diagnosis['rsi_values'].get('SQQQ', {}).get('rsi_10'),
+                        'BSV': diagnosis['rsi_values'].get('BSV', {}).get('rsi_10')
+                    }
+                }
+                
+                # Check if the filter would select the right asset
+                filter_assets = [{'ticker': 'SQQQ'}, {'ticker': 'BSV'}]
+                filter_config = {
+                    'step': 'filter',
+                    'sort-by-fn': 'relative-strength-index',
+                    'sort-by-window-days': '10',
+                    'select-fn': 'top',
+                    'select-n': '1'
+                }
+                
+                try:
+                    filter_result = self.apply_filter(filter_assets, filter_config, date)
+                    diagnosis['filter_results']['actual_filter_result'] = filter_result
+                    if expected_asset not in filter_result:
+                        diagnosis['issues'].append(f"Filter selected {filter_result} instead of {expected_asset}")
+                except Exception as e:
+                    diagnosis['issues'].append(f"Filter evaluation failed: {e}")
+            
+        except Exception as e:
+            diagnosis['error'] = str(e)
+            diagnosis['issues'].append(f"Diagnosis failed: {e}")
+        
+        return diagnosis
 
 def compare_allocations(inhouse_results: pd.DataFrame, composer_allocations: pd.DataFrame, 
                        composer_tickers: List[str], start_date, end_date) -> pd.DataFrame:
