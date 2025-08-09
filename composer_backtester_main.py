@@ -307,9 +307,9 @@ class ComposerBacktester:
             st.error("yfinance is required for data download. Please install it.")
             return {}
             
-        # CRITICAL FIX: Add buffer for technical indicators
-        # Most indicators need 50+ days of historical data for accurate calculation
-        buffer_days = 100  # Sufficient for RSI, SMA, and other indicators
+        # CRITICAL FIX: Increase buffer for technical indicators
+        # Strategy uses 200-day MA, so we need at least 250 days of historical data
+        buffer_days = 250  # Sufficient for 200-day MA, RSI, and other indicators
         start_with_buffer = (pd.Timestamp(start_date) - timedelta(days=buffer_days)).strftime('%Y-%m-%d')
         
         st.info(f"Downloading data from {start_with_buffer} to {end_date} (with {buffer_days} day buffer for indicators)")
@@ -325,8 +325,8 @@ class ComposerBacktester:
                     ticker_data = ticker_data.fillna(method='ffill').fillna(method='bfill')
                     
                     # Ensure we have enough data for indicators
-                    if len(ticker_data) < 50:
-                        st.warning(f"Warning: {symbol} has only {len(ticker_data)} data points (minimum 50 recommended)")
+                    if len(ticker_data) < 250:
+                        st.warning(f"Warning: {symbol} has only {len(ticker_data)} data points (minimum 250 recommended for 200-day MA)")
                     
                     data[symbol] = ticker_data
                 else:
@@ -581,74 +581,76 @@ class ComposerBacktester:
         if condition.get('step') != 'if-child':
             return False
             
-        # Skip else conditions in this function
-        if condition.get('is-else-condition?', False):
-            return False
-            
+        # Extract condition parameters
         lhs_fn = condition.get('lhs-fn')
-        rhs_fn = condition.get('rhs-fn') 
         lhs_val = condition.get('lhs-val')
-        rhs_val = condition.get('rhs-val')
+        lhs_window_days = condition.get('lhs-window-days')
         comparator = condition.get('comparator')
-        lhs_window = condition.get('lhs-window-days', condition.get('lhs-fn-params', {}).get('window', 14))
-        rhs_window = condition.get('rhs-window-days', condition.get('rhs-fn-params', {}).get('window', 14))
-        rhs_fixed = condition.get('rhs-fixed-value?', False)
+        rhs_fn = condition.get('rhs-fn')
+        rhs_val = condition.get('rhs-val')
+        rhs_window_days = condition.get('rhs-window-days')
+        rhs_fixed_value = condition.get('rhs-fixed-value?', False)
         
-        # Convert string windows to integers
-        if isinstance(lhs_window, str):
-            lhs_window = int(lhs_window)
-        if isinstance(rhs_window, str):
-            rhs_window = int(rhs_window)
+        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+            st.write(f"🔍 Evaluating condition: {lhs_fn}({lhs_val}, {lhs_window_days}) {comparator} {rhs_fn}({rhs_val}, {rhs_window_days})")
         
-        # Get left-hand side value
-        lhs_value = self.get_indicator_value(lhs_val, lhs_fn, lhs_window, date)
-        
-        # Get right-hand side value
-        if rhs_fixed:
-            try:
-                rhs_value = float(rhs_val)
-            except (ValueError, TypeError):
-                return False
-        else:
-            rhs_value = self.get_indicator_value(rhs_val, rhs_fn, rhs_window, date)
-        
-        # Ensure we have scalar values
-        if pd.isna(lhs_value) or pd.isna(rhs_value):
-            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                st.write(f"Debug: Missing data - LHS: {lhs_value}, RHS: {rhs_value}")
-            return False
-        
-        # Convert to float to ensure scalar comparison
         try:
-            lhs_value = float(lhs_value)
-            rhs_value = float(rhs_value)
-        except (ValueError, TypeError):
-            return False
-        
-        # Enhanced debug output
-        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-            st.write(f"🔍 Condition: {lhs_fn}({lhs_val}, {lhs_window}) = {lhs_value:.4f} {comparator} {rhs_value:.4f}")
-        
-        # Compare values
-        if comparator == 'gt':
-            result = lhs_value > rhs_value
-        elif comparator == 'lt':
-            result = lhs_value < rhs_value
-        elif comparator == 'gte':
-            result = lhs_value >= rhs_value
-        elif comparator == 'lte':
-            result = lhs_value <= rhs_value
-        elif comparator == 'eq':
-            result = abs(lhs_value - rhs_value) < 0.0001
-        else:
+            # Get left-hand side value
+            if lhs_fn == 'current-price':
+                lhs_value = self.get_asset_price(lhs_val, date)
+            else:
+                lhs_value = self.get_indicator_value(lhs_val, lhs_fn, lhs_window_days, date)
+            
+            # Get right-hand side value
+            if rhs_fixed_value:
+                rhs_value = float(rhs_val) if isinstance(rhs_val, (int, float, str)) else rhs_val
+            elif rhs_fn == 'moving-average-price':
+                rhs_value = self.get_indicator_value(rhs_val, rhs_fn, rhs_window_days, date)
+            else:
+                rhs_value = self.get_indicator_value(rhs_val, rhs_fn, rhs_window_days, date)
+            
+            # CRITICAL FIX: Enhanced debugging for key conditions
             if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                st.write(f"❌ Unknown comparator: {comparator}")
-            result = False
-        
-        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-            st.write(f"  → Result: {result} ({'TRUE' if result else 'FALSE'})")
-        
-        return bool(result)
+                if lhs_val == 'TQQQ' and rhs_val == 'TQQQ' and lhs_fn == 'current-price' and rhs_fn == 'moving-average-price':
+                    st.write(f"🎯 KEY CONDITION: TQQQ Price ({lhs_value}) {comparator} TQQQ {rhs_window_days}-day MA ({rhs_value})")
+                    if pd.isna(lhs_value) or pd.isna(rhs_value):
+                        st.error(f"❌ Missing data: TQQQ Price={lhs_value}, TQQQ {rhs_window_days}-day MA={rhs_value}")
+                    else:
+                        st.write(f"✅ Data available: TQQQ Price={lhs_value:.2f}, TQQQ {rhs_window_days}-day MA={rhs_value:.2f}")
+                else:
+                    st.write(f"📊 Condition values: LHS={lhs_value}, RHS={rhs_value}")
+            
+            # Handle NaN values
+            if pd.isna(lhs_value) or pd.isna(rhs_value):
+                if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                    st.write(f"⚠️ NaN values detected: LHS={lhs_value}, RHS={rhs_value}")
+                return False
+            
+            # Evaluate comparison
+            if comparator == 'gt':
+                result = lhs_value > rhs_value
+            elif comparator == 'lt':
+                result = lhs_value < rhs_value
+            elif comparator == 'gte':
+                result = lhs_value >= rhs_value
+            elif comparator == 'lte':
+                result = lhs_value <= rhs_value
+            elif comparator == 'eq':
+                result = lhs_value == rhs_value
+            else:
+                if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                    st.write(f"❌ Unknown comparator: {comparator}")
+                return False
+            
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"🔍 Condition result: {lhs_value} {comparator} {rhs_value} = {result}")
+            
+            return result
+            
+        except Exception as e:
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.error(f"❌ Error evaluating condition: {e}")
+            return False
     
     def apply_filter(self, assets: List[Dict[str, Any]], filter_config: Dict[str, Any], date: pd.Timestamp) -> List[str]:
         """Apply filter to select assets"""
@@ -731,30 +733,37 @@ class ComposerBacktester:
                     st.write(f"❌ IF node has no children")
                 return []
                 
-            # Process if-child nodes in order
+            # CRITICAL FIX: Process if-child nodes in the correct order
+            # First, find the non-else condition (the actual condition to evaluate)
+            condition_node = None
+            else_nodes = []
+            
             for child in children:
                 if child.get('step') == 'if-child':
-                    is_else = child.get('is-else-condition?', False)
-                    
-                    if not is_else:
-                        # Evaluate condition with detailed logging
-                        condition_result = self.evaluate_condition(child, date)
-                        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                            st.write(f"🔍 Condition result: {condition_result}")
-                        
-                        if condition_result:
-                            result = self.evaluate_children(child.get('children', []), date)
-                            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                                st.write(f"✅ IF condition TRUE, selected: {result}")
-                            return result
+                    if child.get('is-else-condition?', False):
+                        else_nodes.append(child)
+                    else:
+                        condition_node = child
             
-            # Handle else condition
-            for child in children:
-                if child.get('step') == 'if-child' and child.get('is-else-condition?', False):
-                    result = self.evaluate_children(child.get('children', []), date)
+            # Evaluate the condition first
+            if condition_node:
+                condition_result = self.evaluate_condition(condition_node, date)
+                if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                    st.write(f"🔍 Main condition result: {condition_result}")
+                
+                if condition_result:
+                    # Condition is TRUE, evaluate the TRUE branch
+                    result = self.evaluate_children(condition_node.get('children', []), date)
                     if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                        st.write(f"🔄 ELSE condition executed, selected: {result}")
+                        st.write(f"✅ IF condition TRUE, selected: {result}")
                     return result
+            
+            # If condition is FALSE or no condition found, evaluate else branches
+            for else_node in else_nodes:
+                result = self.evaluate_children(else_node.get('children', []), date)
+                if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                    st.write(f"🔄 ELSE condition executed, selected: {result}")
+                return result
             
             return []
         
@@ -770,28 +779,56 @@ class ComposerBacktester:
             return result
         
         elif step == 'wt-cash-equal':
-            # CRITICAL FIX: Implement proper equal weight calculation
+            # CRITICAL FIX: wt-cash-equal should evaluate its children properly
+            # This includes evaluating any if conditions within it
             children = node.get('children', [])
-            selected_assets = self.evaluate_children(children, date)
             if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                st.write(f"Equal weight calculation: {selected_assets}")
-            return selected_assets
+                st.write(f"wt-cash-equal: evaluating {len(children)} children")
+            
+            # For wt-cash-equal, we should only get ONE asset back (not multiple)
+            # Evaluate children and return the first valid result
+            for child in children:
+                result = self.evaluate_node(child, date)
+                if result:
+                    if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                        st.write(f"wt-cash-equal: selected {result}")
+                    return result
+            
+            return []
         
         elif step == 'wt-cash-specified':
-            # CRITICAL FIX: Implement specified weight calculation
+            # CRITICAL FIX: wt-cash-specified should evaluate its children properly
             children = node.get('children', [])
-            selected_assets = self.evaluate_children(children, date)
             if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                st.write(f"Specified weight calculation: {selected_assets}")
-            return selected_assets
+                st.write(f"wt-cash-specified: evaluating {len(children)} children")
+            
+            # For wt-cash-specified, we should only get ONE asset back (not multiple)
+            # Evaluate children and return the first valid result
+            for child in children:
+                result = self.evaluate_node(child, date)
+                if result:
+                    if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                        st.write(f"wt-cash-specified: selected {result}")
+                    return result
+            
+            return []
         
         elif step == 'wt-inverse-vol':
-            # CRITICAL FIX: Implement inverse volatility weight calculation
+            # CRITICAL FIX: wt-inverse-vol should evaluate its children properly
             children = node.get('children', [])
-            selected_assets = self.evaluate_children(children, date)
             if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                st.write(f"Inverse volatility weight calculation: {selected_assets}")
-            return selected_assets
+                st.write(f"wt-inverse-vol: evaluating {len(children)} children")
+            
+            # For wt-inverse-vol, we should only get ONE asset back (not multiple)
+            # Evaluate children and return the first valid result
+            for child in children:
+                result = self.evaluate_node(child, date)
+                if result:
+                    if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                        st.write(f"wt-inverse-vol: selected {result}")
+                    return result
+            
+            return []
         
         elif step == 'group':
             return self.evaluate_children(node.get('children', []), date)
