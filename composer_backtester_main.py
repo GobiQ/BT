@@ -1239,15 +1239,37 @@ class ComposerBacktester:
             if 'Close' in df.columns:
                 close_prices = df['Close']
                 
+                # Ensure close_prices is a pandas Series and handle NaN values
+                if not isinstance(close_prices, pd.Series):
+                    st.warning(f"⚠️ {symbol}: Close prices is not a pandas Series")
+                    validation_passed = False
+                    continue
+                
+                # Remove NaN values before comparison
+                valid_prices = close_prices.dropna()
+                
+                if len(valid_prices) == 0:
+                    st.warning(f"⚠️ {symbol}: No valid close prices found after removing NaN values")
+                    validation_passed = False
+                    continue
+                
                 # Check for zero or negative prices
-                if (close_prices <= 0).any():
-                    st.warning(f"⚠️ {symbol}: Found zero or negative prices")
+                try:
+                    if (valid_prices <= 0).any():
+                        st.warning(f"⚠️ {symbol}: Found zero or negative prices")
+                        validation_passed = False
+                except Exception as e:
+                    st.warning(f"⚠️ {symbol}: Error checking for zero/negative prices: {e}")
                     validation_passed = False
                 
                 # Check for extreme price movements (>50% in one day)
-                daily_returns = close_prices.pct_change().abs()
-                if (daily_returns > 0.5).any():
-                    st.warning(f"⚠️ {symbol}: Found extreme daily returns (>50%)")
+                try:
+                    daily_returns = valid_prices.pct_change().abs().dropna()
+                    if len(daily_returns) > 0 and (daily_returns > 0.5).any():
+                        st.warning(f"⚠️ {symbol}: Found extreme daily returns (>50%)")
+                        validation_passed = False
+                except Exception as e:
+                    st.warning(f"⚠️ {symbol}: Error checking for extreme returns: {e}")
                     validation_passed = False
         
         if validation_passed:
