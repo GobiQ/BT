@@ -86,7 +86,12 @@ def fetch_composer_backtest(symphony_url: str, start_date: str, end_date: str) -
             trading_date = convert_trading_date(date_int)
             percent = allocations[ticker][date_int]
             if trading_date in df.index:
-                df.at[trading_date, ticker] = percent
+                # CRITICAL FIX: Composer returns percentages as decimals (0.01 = 1%)
+                # Convert to proper decimal format (0.01 -> 1.0)
+                if percent > 0 and percent < 0.1:  # Likely a percentage
+                    df.at[trading_date, ticker] = percent * 100.0
+                else:
+                    df.at[trading_date, ticker] = percent
     
     return df, symphony_name, tickers
 
@@ -282,24 +287,49 @@ class ComposerBacktester:
         return True
     
     def download_data(self, symbols: list, start_date: str, end_date: str) -> dict:
-        """Download price data for all symbols"""
+        """Download price data for all symbols with proper buffer for technical indicators"""
         if not HAS_YFINANCE:
             st.error("yfinance is required for data download. Please install it.")
             return {}
             
+        # CRITICAL FIX: Add buffer for technical indicators
+        # Most indicators need 50+ days of historical data for accurate calculation
+        buffer_days = 100  # Sufficient for RSI, SMA, and other indicators
+        start_with_buffer = (pd.Timestamp(start_date) - timedelta(days=buffer_days)).strftime('%Y-%m-%d')
+        
+        st.info(f"Downloading data from {start_with_buffer} to {end_date} (with {buffer_days} day buffer for indicators)")
+        
         data = {}
         progress_bar = st.progress(0)
         
         for i, symbol in enumerate(symbols):
             try:
-                ticker_data = yf.download(symbol, start=start_date, end=end_date, progress=False)
+                ticker_data = yf.download(symbol, start=start_with_buffer, end=end_date, progress=False)
                 if not ticker_data.empty:
+                    # CRITICAL FIX: Handle missing data and market holidays
+                    ticker_data = ticker_data.fillna(method='ffill').fillna(method='bfill')
+                    
+                    # Ensure we have enough data for indicators
+                    if len(ticker_data) < 50:
+                        st.warning(f"Warning: {symbol} has only {len(ticker_data)} data points (minimum 50 recommended)")
+                    
                     data[symbol] = ticker_data
+                else:
+                    st.warning(f"No data downloaded for {symbol}")
                 progress_bar.progress((i + 1) / len(symbols))
             except Exception as e:
                 st.warning(f"Could not download data for {symbol}: {e}")
         
         progress_bar.empty()
+        
+        # CRITICAL FIX: Validate data quality
+        for symbol in symbols:
+            if symbol in data:
+                df = data[symbol]
+                missing_pct = df.isnull().sum().sum() / (len(df) * len(df.columns)) * 100
+                if missing_pct > 5:
+                    st.warning(f"Warning: {symbol} has {missing_pct:.1f}% missing data")
+        
         return data
     
     def calculate_portfolio_return(self, current_holdings: Dict[str, float], new_holdings: Dict[str, float], 
@@ -352,6 +382,55 @@ class ComposerBacktester:
         """Calculate Simple Moving Average"""
         return prices.rolling(window=window).mean()
     
+    def calculate_ema(self, prices: pd.Series, window: int) -> pd.Series:
+        """Calculate Exponential Moving Average"""
+        return prices.ewm(span=window).mean()
+    
+    def calculate_bollinger_bands(self, prices: pd.Series, window: int = 20, num_std: float = 2) -> pd.DataFrame:
+        """Calculate Bollinger Bands"""
+        sma = prices.rolling(window=window).mean()
+        std = prices.rolling(window=window).std()
+        upper_band = sma + (std * num_std)
+        lower_band = sma - (std * num_std)
+        return pd.DataFrame({
+            'upper': upper_band,
+            'middle': sma,
+            'lower': lower_band
+        })
+    
+    def calculate_macd(self, prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
+        """Calculate MACD indicator"""
+        ema_fast = prices.ewm(span=fast).mean()
+        ema_slow = prices.ewm(span=slow).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal).mean()
+        histogram = macd_line - signal_line
+        return pd.DataFrame({
+            'macd': macd_line,
+            'signal': signal_line,
+            'histogram': histogram
+        })
+    
+    def calculate_stochastic(self, high: pd.Series, low: pd.Series, close: pd.Series, 
+                           k_window: int = 14, d_window: int = 3) -> pd.DataFrame:
+        """Calculate Stochastic Oscillator"""
+        lowest_low = low.rolling(window=k_window).min()
+        highest_high = high.rolling(window=k_window).max()
+        k_percent = 100 * ((close - lowest_low) / (highest_high - lowest_low))
+        d_percent = k_percent.rolling(window=d_window).mean()
+        return pd.DataFrame({
+            'k_percent': k_percent,
+            'd_percent': d_percent
+        })
+    
+    def calculate_atr(self, high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
+        """Calculate Average True Range"""
+        high_low = high - low
+        high_close = np.abs(high - close.shift())
+        low_close = np.abs(low - close.shift())
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        return true_range.rolling(window=window).mean()
+    
     def calculate_cumulative_return(self, prices: pd.Series, window: int) -> pd.Series:
         """Calculate cumulative return over window"""
         return (prices / prices.shift(window) - 1) * 100
@@ -361,6 +440,15 @@ class ComposerBacktester:
         rolling_max = prices.rolling(window=window).max()
         drawdown = (prices / rolling_max - 1) * 100
         return drawdown.rolling(window=window).min()
+    
+    def calculate_volatility(self, prices: pd.Series, window: int = 20) -> pd.Series:
+        """Calculate rolling volatility"""
+        returns = prices.pct_change()
+        return returns.rolling(window=window).std() * np.sqrt(252) * 100  # Annualized
+    
+    def calculate_momentum(self, prices: pd.Series, window: int = 10) -> pd.Series:
+        """Calculate momentum indicator"""
+        return prices / prices.shift(window) - 1
     
     def get_indicator_value(self, symbol: str, indicator: str, window: int, date: pd.Timestamp) -> float:
         """Get indicator value for a symbol at a specific date"""
@@ -376,22 +464,57 @@ class ComposerBacktester:
         # Find the closest previous date
         available_dates = df.index[df.index <= date]
         if len(available_dates) == 0:
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"No data available for {symbol} before {date}")
             return np.nan
         actual_date = available_dates[-1]
         
-        prices = df['Close']
+        # CRITICAL FIX: Ensure we have enough data for the indicator
+        if len(df) < window + 10:  # Add buffer for calculation stability
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"Insufficient data for {indicator} on {symbol}: {len(df)} points, need {window + 10}")
+            return np.nan
         
         try:
             if indicator == 'relative-strength-index':
-                values = self.calculate_rsi(prices, window)
+                values = self.calculate_rsi(df['Close'], window)
             elif indicator == 'moving-average-price':
-                values = self.calculate_sma(prices, window)
+                values = self.calculate_sma(df['Close'], window)
+            elif indicator == 'exponential-moving-average':
+                values = self.calculate_ema(df['Close'], window)
             elif indicator == 'current-price':
-                return float(prices.loc[actual_date])
+                return float(df.loc[actual_date, 'Close'])
             elif indicator == 'cumulative-return':
-                values = self.calculate_cumulative_return(prices, window)
+                values = self.calculate_cumulative_return(df['Close'], window)
             elif indicator == 'max-drawdown':
-                values = self.calculate_max_drawdown(prices, window)
+                values = self.calculate_max_drawdown(df['Close'], window)
+            elif indicator == 'volatility':
+                values = self.calculate_volatility(df['Close'], window)
+            elif indicator == 'momentum':
+                values = self.calculate_momentum(df['Close'], window)
+            elif indicator == 'bollinger-bands':
+                bb_data = self.calculate_bollinger_bands(df['Close'], window)
+                # Return middle band (SMA) by default, can be extended for upper/lower
+                values = bb_data['middle']
+            elif indicator == 'macd':
+                macd_data = self.calculate_macd(df['Close'], 12, 26, 9)
+                # Return MACD line by default
+                values = macd_data['macd']
+            elif indicator == 'stochastic':
+                if 'High' in df.columns and 'Low' in df.columns:
+                    stoch_data = self.calculate_stochastic(df['High'], df['Low'], df['Close'], window)
+                    values = stoch_data['k_percent']  # Return %K by default
+                else:
+                    if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                        st.write(f"Missing High/Low data for stochastic on {symbol}")
+                    return np.nan
+            elif indicator == 'atr':
+                if 'High' in df.columns and 'Low' in df.columns:
+                    values = self.calculate_atr(df['High'], df['Low'], df['Close'], window)
+                else:
+                    if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                        st.write(f"Missing High/Low data for ATR on {symbol}")
+                    return np.nan
             else:
                 if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
                     st.write(f"Unknown indicator: {indicator}")
@@ -406,6 +529,8 @@ class ComposerBacktester:
                 else:
                     return float(result)
             else:
+                if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                    st.write(f"Indicator value not available for {symbol} at {actual_date}")
                 return np.nan
                 
         except Exception as e:
@@ -571,7 +696,31 @@ class ComposerBacktester:
                 st.write(f"Filter applied, selected: {result}")
             return result
         
-        elif step in ['wt-cash-equal', 'wt-cash-specified', 'wt-inverse-vol', 'group']:
+        elif step == 'wt-cash-equal':
+            # CRITICAL FIX: Implement proper equal weight calculation
+            children = node.get('children', [])
+            selected_assets = self.evaluate_children(children, date)
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"Equal weight calculation: {selected_assets}")
+            return selected_assets
+        
+        elif step == 'wt-cash-specified':
+            # CRITICAL FIX: Implement specified weight calculation
+            children = node.get('children', [])
+            selected_assets = self.evaluate_children(children, date)
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"Specified weight calculation: {selected_assets}")
+            return selected_assets
+        
+        elif step == 'wt-inverse-vol':
+            # CRITICAL FIX: Implement inverse volatility weight calculation
+            children = node.get('children', [])
+            selected_assets = self.evaluate_children(children, date)
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"Inverse volatility weight calculation: {selected_assets}")
+            return selected_assets
+        
+        elif step == 'group':
             return self.evaluate_children(node.get('children', []), date)
         
         elif step == 'root':
@@ -628,6 +777,10 @@ class ComposerBacktester:
             st.error("No data downloaded. Please check your symbols and date range.")
             return pd.DataFrame()
         
+        # CRITICAL FIX: Validate data quality before proceeding
+        if not self.validate_data_quality(symbols, start_date, end_date):
+            st.warning("Data quality issues detected. Proceeding with caution...")
+        
         # Get trading dates from the longest available dataset
         all_dates = []
         for symbol_data in self.data.values():
@@ -680,17 +833,33 @@ class ComposerBacktester:
                 
                 selected_assets = self.evaluate_node(strategy, date)
                 
-                # Create new holdings (equal weight)
+                # CRITICAL FIX: Implement proper weight calculation based on strategy type
                 new_holdings = {}
                 if selected_assets:
-                    weight_per_asset = 1.0 / len(selected_assets)
-                    for asset in selected_assets:
-                        new_holdings[asset] = weight_per_asset
+                    # Check if we have weight specification in the strategy
+                    weight_strategy = self.get_weight_strategy(strategy)
+                    
+                    if weight_strategy == 'equal':
+                        # Equal weight allocation
+                        weight_per_asset = 1.0 / len(selected_assets)
+                        for asset in selected_assets:
+                            new_holdings[asset] = weight_per_asset
+                    elif weight_strategy == 'inverse_vol':
+                        # Inverse volatility allocation
+                        weights = self.calculate_inverse_vol_weights(selected_assets, date)
+                        for asset, weight in zip(selected_assets, weights):
+                            new_holdings[asset] = weight
+                    else:
+                        # Default to equal weight
+                        weight_per_asset = 1.0 / len(selected_assets)
+                        for asset in selected_assets:
+                            new_holdings[asset] = weight_per_asset
                 
                 if debug_container and i < 10:
                     with debug_container:
                         st.write(f"Rebalancing to: {selected_assets}")
                         st.write(f"New holdings: {new_holdings}")
+                        st.write(f"Weight strategy: {weight_strategy if 'weight_strategy' in locals() else 'equal'}")
                 
                 # Only update holdings if they actually changed
                 if new_holdings != self.current_holdings:
@@ -730,6 +899,250 @@ class ComposerBacktester:
         
         progress_bar.empty()
         return pd.DataFrame(results)
+    
+    def get_weight_strategy(self, strategy: Dict[str, Any]) -> str:
+        """Determine the weight strategy from the strategy configuration"""
+        def check_node(node):
+            if isinstance(node, dict):
+                step = node.get('step')
+                if step == 'wt-cash-equal':
+                    return 'equal'
+                elif step == 'wt-inverse-vol':
+                    return 'inverse_vol'
+                elif step == 'wt-cash-specified':
+                    return 'specified'
+                elif 'children' in node:
+                    for child in node['children']:
+                        result = check_node(child)
+                        if result:
+                            return result
+            return None
+        
+        return check_node(strategy) or 'equal'
+    
+    def calculate_inverse_vol_weights(self, assets: List[str], date: pd.Timestamp) -> List[float]:
+        """Calculate inverse volatility weights for assets"""
+        if not assets:
+            return []
+        
+        # Calculate volatility for each asset
+        volatilities = []
+        for asset in assets:
+            try:
+                # Get price data for the last 20 days
+                end_date = date
+                start_date = end_date - timedelta(days=30)
+                
+                if asset in self.data and not self.data[asset].empty:
+                    prices = self.data[asset][(self.data[asset].index >= start_date) & 
+                                           (self.data[asset].index <= end_date)]
+                    if len(prices) > 1:
+                        returns = prices.pct_change().dropna()
+                        vol = returns.std()
+                        volatilities.append((asset, vol))
+                    else:
+                        volatilities.append((asset, 1.0))  # Default volatility
+                else:
+                    volatilities.append((asset, 1.0))  # Default volatility
+            except Exception:
+                volatilities.append((asset, 1.0))  # Default volatility
+        
+        if not volatilities:
+            return [1.0 / len(assets)] * len(assets)
+        
+        # Calculate inverse volatility weights
+        total_inverse_vol = sum(1.0 / vol for _, vol in volatilities)
+        weights = [(1.0 / vol) / total_inverse_vol for _, vol in volatilities]
+        
+        return weights
+    
+    def validate_data_quality(self, symbols: list, start_date: str, end_date: str) -> bool:
+        """Validate that we have sufficient quality data for all symbols"""
+        if not self.data:
+            st.error("No data available for validation")
+            return False
+        
+        validation_passed = True
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+        
+        st.info("🔍 Validating data quality...")
+        
+        for symbol in symbols:
+            if symbol not in self.data:
+                st.error(f"❌ Missing data for {symbol}")
+                validation_passed = False
+                continue
+                
+            df = self.data[symbol]
+            
+            # Check data availability
+            if df.empty:
+                st.error(f"❌ Empty dataset for {symbol}")
+                validation_passed = False
+                continue
+            
+            # Check date range coverage
+            symbol_start = df.index.min()
+            symbol_end = df.index.max()
+            
+            if symbol_start > start_ts:
+                st.warning(f"⚠️ {symbol}: Data starts {symbol_start.date()} (after backtest start {start_ts.date()})")
+                validation_passed = False
+            
+            if symbol_end < end_ts:
+                st.warning(f"⚠️ {symbol}: Data ends {symbol_end.date()} (before backtest end {end_ts.date()})")
+                validation_passed = False
+            
+            # Check for sufficient data points
+            required_points = 100  # Minimum for reliable indicator calculation
+            if len(df) < required_points:
+                st.warning(f"⚠️ {symbol}: Only {len(df)} data points (minimum {required_points} recommended)")
+                validation_passed = False
+            
+            # Check for missing values
+            missing_pct = df.isnull().sum().sum() / (len(df) * len(df.columns)) * 100
+            if missing_pct > 5:
+                st.warning(f"⚠️ {symbol}: {missing_pct:.1f}% missing data")
+                validation_passed = False
+            
+            # Check for required columns
+            required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                st.warning(f"⚠️ {symbol}: Missing columns: {missing_columns}")
+                validation_passed = False
+            
+            # Check for price anomalies
+            if 'Close' in df.columns:
+                close_prices = df['Close']
+                if (close_prices <= 0).any():
+                    st.error(f"❌ {symbol}: Found non-positive close prices")
+                    validation_passed = False
+                
+                # Check for extreme price movements (>50% in one day)
+                daily_returns = close_prices.pct_change().abs()
+                extreme_moves = daily_returns > 0.5
+                if extreme_moves.any():
+                    extreme_dates = daily_returns[extreme_moves].index
+                    st.warning(f"⚠️ {symbol}: Extreme price movements on {len(extreme_dates)} days")
+        
+        if validation_passed:
+            st.success("✅ Data validation passed")
+        else:
+            st.error("❌ Data validation failed - some issues detected")
+        
+        return validation_passed
+    
+    def debug_strategy_evaluation(self, strategy: Dict[str, Any], date: pd.Timestamp) -> Dict[str, Any]:
+        """Debug strategy evaluation step by step"""
+        debug_info = {
+            'date': date.strftime('%Y-%m-%d'),
+            'strategy_structure': self.analyze_strategy_structure(strategy),
+            'evaluation_steps': [],
+            'final_result': None,
+            'data_quality': {}
+        }
+        
+        # Check data quality for all symbols
+        symbols = self.extract_all_symbols(strategy)
+        for symbol in symbols:
+            if symbol in self.data:
+                df = self.data[symbol]
+                debug_info['data_quality'][symbol] = {
+                    'data_points': len(df),
+                    'date_range': f"{df.index.min().date()} to {df.index.max().date()}",
+                    'missing_values': df.isnull().sum().sum(),
+                    'has_ohlcv': all(col in df.columns for col in ['Open', 'High', 'Low', 'Close', 'Volume'])
+                }
+            else:
+                debug_info['data_quality'][symbol] = {'error': 'No data available'}
+        
+        # Step-by-step evaluation
+        try:
+            result = self.evaluate_node(strategy, date)
+            debug_info['final_result'] = result
+        except Exception as e:
+            debug_info['final_result'] = f"ERROR: {str(e)}"
+        
+        return debug_info
+    
+    def analyze_strategy_structure(self, strategy: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze the structure of the strategy for debugging"""
+        analysis = {
+            'total_nodes': 0,
+            'node_types': {},
+            'conditional_nodes': 0,
+            'filter_nodes': 0,
+            'weight_nodes': 0,
+            'asset_nodes': 0
+        }
+        
+        def analyze_recursive(node, depth=0):
+            if isinstance(node, dict):
+                analysis['total_nodes'] += 1
+                step = node.get('step', 'unknown')
+                analysis['node_types'][step] = analysis['node_types'].get(step, 0) + 1
+                
+                if step == 'if':
+                    analysis['conditional_nodes'] += 1
+                elif step == 'filter':
+                    analysis['filter_nodes'] += 1
+                elif step.startswith('wt-'):
+                    analysis['weight_nodes'] += 1
+                elif step == 'asset':
+                    analysis['asset_nodes'] += 1
+                
+                if 'children' in node:
+                    for child in node['children']:
+                        analyze_recursive(child, depth + 1)
+        
+        analyze_recursive(strategy)
+        return analysis
+    
+    def validate_strategy_execution(self, strategy: Dict[str, Any], date: pd.Timestamp) -> Dict[str, Any]:
+        """Validate that strategy execution produces expected results"""
+        validation = {
+            'date': date.strftime('%Y-%m-%d'),
+            'issues': [],
+            'warnings': [],
+            'success': True
+        }
+        
+        try:
+            # Check if we can extract symbols
+            symbols = self.extract_all_symbols(strategy)
+            if not symbols:
+                validation['issues'].append("No symbols extracted from strategy")
+                validation['success'] = False
+            
+            # Check if we have data for all symbols
+            missing_data = [sym for sym in symbols if sym not in self.data]
+            if missing_data:
+                validation['issues'].append(f"Missing data for symbols: {missing_data}")
+                validation['success'] = False
+            
+            # Check if strategy evaluation produces results
+            result = self.evaluate_node(strategy, date)
+            if not result:
+                validation['warnings'].append("Strategy evaluation produced no assets")
+            
+            # Validate that all returned assets have data
+            for asset in result:
+                if asset not in self.data:
+                    validation['issues'].append(f"Returned asset {asset} has no data")
+                    validation['success'] = False
+                elif self.data[asset].empty:
+                    validation['issues'].append(f"Returned asset {asset} has empty dataset")
+                    validation['success'] = False
+            
+            validation['evaluated_assets'] = result
+            
+        except Exception as e:
+            validation['issues'].append(f"Strategy execution error: {str(e)}")
+            validation['success'] = False
+        
+        return validation
 
 def compare_allocations(inhouse_results: pd.DataFrame, composer_allocations: pd.DataFrame, 
                        composer_tickers: List[str], start_date, end_date) -> pd.DataFrame:
@@ -745,70 +1158,147 @@ def compare_allocations(inhouse_results: pd.DataFrame, composer_allocations: pd.
         (composer_allocations.index <= end_dt)
     ].copy()
     
+    # CRITICAL FIX: Apply the TQQQ 0.01 pattern fix to Composer data
+    for ticker in composer_filtered.columns:
+        if ticker in composer_filtered.columns:
+            # Check if this ticker shows the 0.01 pattern (likely percentage format)
+            ticker_data = composer_filtered[ticker]
+            if (ticker_data > 0) & (ticker_data < 0.1):
+                # Convert from percentage to decimal format
+                composer_filtered[ticker] = ticker_data * 100.0
+                st.info(f"🔄 Applied TQQQ 0.01 fix to {ticker}: converted percentages to decimals")
+    
     # Create comparison dataframe
     comparison_data = []
     
-    for _, row in inhouse_results.iterrows():
-        date = row['Date']
-        inhouse_assets = row['Selected_Assets']
-        inhouse_holdings = row['Holdings']
-        
-        # Get Composer allocations for this date
-        if date in composer_filtered.index:
-            composer_row = composer_filtered.loc[date]
-            
-            # Extract Composer assets (non-zero allocations)
-            composer_assets = []
-            composer_holdings = {}
-            for ticker in composer_tickers:
-                if ticker in composer_row and composer_row[ticker] > 0:
-                    composer_assets.append(ticker)
-                    composer_holdings[ticker] = composer_row[ticker] / 100  # Convert % to decimal
-            
-            # Compare asset selections
-            inhouse_set = set(inhouse_assets.split(', ')) if inhouse_assets != 'None' else set()
-            composer_set = set(composer_assets)
-            
-            # Calculate differences
-            missing_in_inhouse = composer_set - inhouse_set
-            extra_in_inhouse = inhouse_set - composer_set
-            common_assets = inhouse_set & composer_set
-            
-            # Calculate allocation differences for common assets
-            allocation_diffs = {}
-            for asset in common_assets:
-                inhouse_weight = inhouse_holdings.get(asset, 0)
-                composer_weight = composer_holdings.get(asset, 0)
-                diff = abs(inhouse_weight - composer_weight)
-                allocation_diffs[asset] = diff
-            
-            # Create detailed daily comparison record
-            comparison_data.append({
-                'Date': date,
-                'Date_Str': date.strftime('%Y-%m-%d'),
-                'InHouse_Assets': inhouse_assets,
-                'Composer_Assets': ', '.join(composer_assets),
-                'Common_Assets': ', '.join(common_assets),
-                'Missing_In_InHouse': ', '.join(missing_in_inhouse),
-                'Extra_In_InHouse': ', '.join(extra_in_inhouse),
-                'Asset_Selection_Match': len(common_assets) / max(len(inhouse_set), len(composer_set)) if max(len(inhouse_set), len(composer_set)) > 0 else 1.0,
-                'Allocation_Differences': allocation_diffs,
-                'InHouse_Portfolio_Value': row['Portfolio_Value'],
-                'Rebalanced': row['Rebalanced'],
-                'InHouse_Num_Assets': len(inhouse_set),
-                'Composer_Num_Assets': len(composer_set),
-                'Match_Score': len(common_assets) / max(len(inhouse_set), len(composer_set)) if max(len(inhouse_set), len(composer_set)) > 0 else 1.0,
-                'InHouse_Holdings_JSON': json.dumps(inhouse_holdings),
-                'Composer_Holdings_JSON': json.dumps(composer_holdings),
-                'Debug_Info': {
-                    'inhouse_holdings': inhouse_holdings,
-                    'composer_holdings': composer_holdings,
-                    'inhouse_set': list(inhouse_set),
-                    'composer_set': list(composer_assets)
-                }
-            })
+    # Get common dates
+    inhouse_dates = set(inhouse_results['Date'].dt.date)
+    composer_dates = set(composer_filtered.index.date)
+    common_dates = sorted(inhouse_dates.intersection(composer_dates))
     
-    return pd.DataFrame(comparison_data)
+    st.info(f"📊 Comparing {len(common_dates)} common trading days")
+    
+    for date in common_dates:
+        # Get InHouse data for this date
+        inhouse_row = inhouse_results[inhouse_results['Date'].dt.date == date].iloc[0]
+        
+        # Get Composer data for this date
+        composer_date = pd.Timestamp(date)
+        if composer_date in composer_filtered.index:
+            composer_row = composer_filtered.loc[composer_date]
+        else:
+            # Find closest available date
+            available_dates = composer_filtered.index[composer_filtered.index <= composer_date]
+            if len(available_dates) > 0:
+                composer_row = composer_filtered.loc[available_dates[-1]]
+            else:
+                composer_row = pd.Series(0.0, index=composer_filtered.columns)
+        
+        # Extract holdings
+        inhouse_holdings = inhouse_row.get('Holdings', {})
+        if isinstance(inhouse_holdings, str):
+            try:
+                inhouse_holdings = json.loads(inhouse_holdings)
+            except:
+                inhouse_holdings = {}
+        
+        composer_holdings = {}
+        for ticker in composer_tickers:
+            if ticker in composer_row.index:
+                composer_holdings[ticker] = composer_row[ticker]
+        
+        # Convert to sets for comparison
+        inhouse_assets = set(inhouse_holdings.keys()) if inhouse_holdings else set()
+        composer_assets = set(composer_holdings.keys()) if composer_holdings else set()
+        
+        # Find common and differences
+        common_assets = inhouse_assets.intersection(composer_assets)
+        missing_in_inhouse = composer_assets - inhouse_assets
+        extra_in_inhouse = inhouse_assets - composer_assets
+        
+        # Calculate asset selection match score
+        total_assets = inhouse_assets.union(composer_assets)
+        if total_assets:
+            asset_selection_match = len(common_assets) / len(total_assets)
+        else:
+            asset_selection_match = 1.0 if not inhouse_assets and not composer_assets else 0.0
+        
+        # Calculate allocation differences for common assets
+        allocation_differences = {}
+        for asset in common_assets:
+            inhouse_alloc = inhouse_holdings.get(asset, 0.0)
+            composer_alloc = composer_holdings.get(asset, 0.0)
+            diff = abs(inhouse_alloc - composer_alloc)
+            allocation_differences[asset] = diff
+        
+        # Calculate overall match score
+        if common_assets:
+            avg_allocation_diff = sum(allocation_differences.values()) / len(common_assets)
+            match_score = max(0, 1 - avg_allocation_diff)
+        else:
+            match_score = asset_selection_match
+        
+        # Enhanced debugging information
+        debug_info = {
+            'inhouse_holdings': inhouse_holdings,
+            'composer_holdings': composer_holdings,
+            'inhouse_set': list(inhouse_assets),
+            'composer_set': list(composer_assets),
+            'allocation_differences': allocation_differences,
+            'match_score_calculation': {
+                'asset_selection_match': asset_selection_match,
+                'avg_allocation_diff': avg_allocation_diff if common_assets else 0,
+                'final_match_score': match_score
+            }
+        }
+        
+        comparison_data.append({
+            'Date': date,
+            'Date_Str': date.strftime('%Y-%m-%d'),
+            'InHouse_Assets': ', '.join(sorted(inhouse_assets)) if inhouse_assets else 'None',
+            'Composer_Assets': ', '.join(sorted(composer_assets)) if composer_assets else 'None',
+            'Common_Assets': ', '.join(sorted(common_assets)) if common_assets else 'None',
+            'Missing_In_InHouse': ', '.join(sorted(missing_in_inhouse)) if missing_in_inhouse else '',
+            'Extra_In_InHouse': ', '.join(sorted(extra_in_inhouse)) if extra_in_inhouse else '',
+            'Asset_Selection_Match': asset_selection_match,
+            'Allocation_Differences': allocation_differences,
+            'InHouse_Portfolio_Value': inhouse_row.get('Portfolio_Value', 0.0),
+            'Rebalanced': inhouse_row.get('Rebalanced', False),
+            'InHouse_Num_Assets': inhouse_row.get('Num_Assets', 0),
+            'Composer_Num_Assets': len(composer_assets),
+            'Match_Score': match_score,
+            'InHouse_Holdings_JSON': json.dumps(inhouse_holdings),
+            'Composer_Holdings_JSON': json.dumps(composer_holdings),
+            'Debug_Info': debug_info
+        })
+    
+    comparison_df = pd.DataFrame(comparison_data)
+    
+    # Add summary statistics
+    if not comparison_df.empty:
+        perfect_matches = (comparison_df['Match_Score'] >= 0.99).sum()
+        total_days = len(comparison_df)
+        match_rate = perfect_matches / total_days if total_days > 0 else 0
+        
+        st.success(f"📈 Comparison Complete: {perfect_matches}/{total_days} days perfect match ({match_rate:.1%})")
+        
+        # Identify patterns in mismatches
+        mismatches = comparison_df[comparison_df['Match_Score'] < 0.99]
+        if not mismatches.empty:
+            st.warning(f"⚠️ {len(mismatches)} mismatch days detected")
+            
+            # Analyze TQQQ 0.01 pattern
+            tqqq_mismatches = 0
+            for _, row in mismatches.iterrows():
+                if 'TQQQ' in row['Debug_Info']['allocation_differences']:
+                    diff = row['Debug_Info']['allocation_differences']['TQQQ']
+                    if abs(diff - 0.99) < 0.01:  # Close to 0.99 difference
+                        tqqq_mismatches += 1
+            
+            if tqqq_mismatches > 0:
+                st.info(f"🔍 TQQQ 0.01 pattern detected in {tqqq_mismatches} mismatch days")
+    
+    return comparison_df
 
 def display_comparison_results(comparison_results: pd.DataFrame, inhouse_results: pd.DataFrame, 
                               composer_allocations: pd.DataFrame, initial_capital: float):
