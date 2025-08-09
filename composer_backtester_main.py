@@ -1195,7 +1195,9 @@ def compare_allocations(inhouse_results: pd.DataFrame, composer_allocations: pd.
         if ticker in composer_filtered.columns:
             # Check if this ticker shows the 0.01 pattern (likely percentage format)
             ticker_data = composer_filtered[ticker]
-            if (ticker_data > 0) & (ticker_data < 0.1):
+            # Check if any values in the series match the pattern
+            percentage_pattern = (ticker_data > 0) & (ticker_data < 0.1)
+            if percentage_pattern.any():
                 # Convert from percentage to decimal format
                 composer_filtered[ticker] = ticker_data * 100.0
                 st.info(f"🔄 Applied TQQQ 0.01 fix to {ticker}: converted percentages to decimals")
