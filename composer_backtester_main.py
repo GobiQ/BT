@@ -1016,7 +1016,10 @@ class ComposerBacktester:
             # Check for price anomalies
             if 'Close' in df.columns:
                 close_prices = df['Close']
-                if (close_prices <= 0).any():
+                # Ensure close_prices is numeric and handle any NaN values
+                close_prices = pd.to_numeric(close_prices, errors='coerce')
+                non_positive_mask = close_prices <= 0
+                if non_positive_mask.any():
                     st.error(f"❌ {symbol}: Found non-positive close prices")
                     validation_passed = False
                 
