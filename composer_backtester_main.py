@@ -633,13 +633,25 @@ class ComposerBacktester:
     
     def apply_filter(self, assets: List[Dict[str, Any]], filter_config: Dict[str, Any], date: pd.Timestamp) -> List[str]:
         """Apply filter to select assets"""
-        if filter_config['step'] != 'filter':
+        # CRITICAL FIX: Handle case where filter_config is not a filter
+        if filter_config.get('step') != 'filter':
+            # Return all asset tickers if this isn't a filter
             return [asset['ticker'] for asset in assets if 'ticker' in asset]
+        
+        # CRITICAL FIX: Handle case where no assets are provided
+        if not assets:
+            st.warning("No assets provided to filter")
+            return []
         
         sort_fn = filter_config.get('sort-by-fn')
         sort_window = filter_config.get('sort-by-window-days', 14)
         select_fn = filter_config.get('select-fn', 'top')
         select_n = int(filter_config.get('select-n', 1))
+        
+        # CRITICAL FIX: If no sort function specified, return all assets
+        if not sort_fn:
+            st.warning("No sort function specified in filter, returning all assets")
+            return [asset['ticker'] for asset in assets if 'ticker' in asset]
         
         # Calculate sort values for each asset
         asset_values = []
@@ -647,20 +659,35 @@ class ComposerBacktester:
             if 'ticker' not in asset:
                 continue
             ticker = asset['ticker']
-            value = self.get_indicator_value(ticker, sort_fn, sort_window, date)
-            if not pd.isna(value):
-                asset_values.append((ticker, float(value)))
+            try:
+                value = self.get_indicator_value(ticker, sort_fn, sort_window, date)
+                if not pd.isna(value) and value is not None:
+                    asset_values.append((ticker, float(value)))
+                else:
+                    # CRITICAL FIX: If indicator value is not available, use a default value
+                    asset_values.append((ticker, 0.0))
+            except Exception as e:
+                st.warning(f"Error getting indicator value for {ticker}: {e}")
+                # CRITICAL FIX: Include asset even if indicator fails
+                asset_values.append((ticker, 0.0))
         
+        # CRITICAL FIX: If no valid values, return all assets
         if not asset_values:
-            return []
+            st.warning("No valid indicator values, returning all assets")
+            return [asset['ticker'] for asset in assets if 'ticker' in asset]
         
         # Sort assets
         if select_fn == 'top':
             asset_values.sort(key=lambda x: x[1], reverse=True)
         elif select_fn == 'bottom':
             asset_values.sort(key=lambda x: x[1])
+        else:
+            # CRITICAL FIX: Handle unknown select function
+            st.warning(f"Unknown select function: {select_fn}, using top")
+            asset_values.sort(key=lambda x: x[1], reverse=True)
         
-        # Select top N
+        # Select top N, but ensure we don't exceed available assets
+        select_n = min(select_n, len(asset_values))
         selected = [ticker for ticker, _ in asset_values[:select_n]]
         
         if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
@@ -748,15 +775,46 @@ class ComposerBacktester:
             # Handle root node
             return self.evaluate_children(node.get('children', []), date)
         
-        return []
+        # CRITICAL FIX: Handle unknown step types by evaluating children
+        elif step is not None:
+            st.warning(f"Unknown step type: {step}, attempting to evaluate children")
+            return self.evaluate_children(node.get('children', []), date)
+        
+        # CRITICAL FIX: If no step specified, try to evaluate children anyway
+        else:
+            st.warning("No step specified in node, attempting to evaluate children")
+            return self.evaluate_children(node.get('children', []), date)
     
     def evaluate_children(self, children: List[Dict[str, Any]], date: pd.Timestamp) -> List[str]:
         """Evaluate all children nodes"""
         all_assets = []
+        
+        # CRITICAL FIX: Handle case where children might be None or empty
+        if not children:
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"No children to evaluate")
+            return []
+        
         for child in children:
-            assets = self.evaluate_node(child, date)
-            all_assets.extend(assets)
-        return list(set(all_assets))  # Remove duplicates
+            try:
+                assets = self.evaluate_node(child, date)
+                if assets:
+                    all_assets.extend(assets)
+                    if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                        st.write(f"Child {child.get('step', 'unknown')} returned assets: {assets}")
+                else:
+                    if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                        st.write(f"Child {child.get('step', 'unknown')} returned no assets")
+            except Exception as e:
+                st.error(f"Error evaluating child node {child}: {e}")
+                continue
+        
+        # CRITICAL FIX: Remove duplicates and ensure we have assets
+        unique_assets = list(set(all_assets))
+        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+            st.write(f"Total unique assets collected: {unique_assets}")
+        
+        return unique_assets
     
     def extract_all_symbols(self, strategy: Dict[str, Any]) -> List[str]:
         """Extract all ticker symbols from strategy"""
@@ -764,24 +822,102 @@ class ComposerBacktester:
         
         def extract_recursive(node):
             if isinstance(node, dict):
+                # CRITICAL FIX: Handle asset nodes
                 if node.get('step') == 'asset' and 'ticker' in node:
                     symbols.add(node['ticker'])
-                elif 'lhs-val' in node and isinstance(node['lhs-val'], str):
-                    symbols.add(node['lhs-val'])
-                elif 'rhs-val' in node and isinstance(node['rhs-val'], str) and not node.get('rhs-fixed-value?', False):
-                    symbols.add(node['rhs-val'])
                 
+                # CRITICAL FIX: Handle conditional logic symbols
+                elif 'lhs-val' in node and isinstance(node['lhs-val'], str):
+                    # Check if this is a ticker symbol (not a technical indicator)
+                    if not any(indicator in node['lhs-val'].lower() for indicator in ['rsi', 'sma', 'ema', 'macd', 'bb', 'stoch', 'atr', 'vol', 'mom']):
+                        symbols.add(node['lhs-val'])
+                
+                elif 'rhs-val' in node and isinstance(node['rhs-val'], str) and not node.get('rhs-fixed-value?', False):
+                    # Check if this is a ticker symbol (not a technical indicator)
+                    if not any(indicator in node['rhs-val'].lower() for indicator in ['rsi', 'sma', 'ema', 'macd', 'bb', 'stoch', 'atr', 'vol', 'mom']):
+                        symbols.add(node['rhs-val'])
+                
+                # CRITICAL FIX: Handle filter nodes that might contain assets
+                elif node.get('step') == 'filter':
+                    # Look for asset children in filter nodes
+                    for child in node.get('children', []):
+                        if isinstance(child, dict) and child.get('step') == 'asset' and 'ticker' in child:
+                            symbols.add(child['ticker'])
+                
+                # CRITICAL FIX: Recursively process all dictionary values
                 for key, value in node.items():
                     extract_recursive(value)
+                    
             elif isinstance(node, list):
                 for item in node:
                     extract_recursive(item)
         
         extract_recursive(strategy)
-        return list(symbols)
+        
+        # CRITICAL FIX: Filter out non-ticker symbols and technical indicators
+        filtered_symbols = []
+        for symbol in symbols:
+            # Skip technical indicators and common non-ticker strings
+            if (symbol and 
+                not any(indicator in symbol.lower() for indicator in ['rsi', 'sma', 'ema', 'macd', 'bb', 'stoch', 'atr', 'vol', 'mom', 'price', 'close', 'high', 'low']) and
+                not symbol.startswith('$') and
+                len(symbol) <= 10):  # Most tickers are 1-10 characters
+                filtered_symbols.append(symbol)
+        
+        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+            st.write(f"Extracted symbols: {list(symbols)}")
+            st.write(f"Filtered symbols: {filtered_symbols}")
+        
+        return filtered_symbols
     
+    def validate_strategy_structure(self, strategy: Dict[str, Any]) -> bool:
+        """Validate that the strategy has the expected structure"""
+        if not isinstance(strategy, dict):
+            st.error("Strategy is not a dictionary")
+            return False
+        
+        if 'step' not in strategy:
+            st.error("Strategy missing 'step' field")
+            return False
+        
+        if 'children' not in strategy:
+            st.error("Strategy missing 'children' field")
+            return False
+        
+        # Check if we have any asset nodes
+        assets_found = []
+        def find_assets(node):
+            if isinstance(node, dict):
+                if node.get('step') == 'asset' and 'ticker' in node:
+                    assets_found.append(node['ticker'])
+                for value in node.values():
+                    find_assets(value)
+            elif isinstance(node, list):
+                for item in node:
+                    find_assets(item)
+        
+        find_assets(strategy)
+        
+        if not assets_found:
+            st.error("No asset nodes found in strategy")
+            return False
+        
+        st.success(f"Strategy validation passed. Found {len(assets_found)} assets: {', '.join(assets_found)}")
+        return True
+
     def run_backtest(self, strategy: Dict[str, Any], start_date: str, end_date: str) -> pd.DataFrame:
         """Run the backtest"""
+        # CRITICAL FIX: Find the root strategy node
+        root_strategy = self.find_root_strategy(strategy)
+        if root_strategy != strategy:
+            st.info(f"Found nested strategy structure, using root strategy with step: {root_strategy.get('step', 'unknown')}")
+            strategy = root_strategy
+        
+        # CRITICAL FIX: Validate strategy structure first
+        if not self.validate_strategy_structure(strategy):
+            st.error("Strategy validation failed. Cannot proceed with backtest.")
+            return pd.DataFrame()
+        
         # Set rebalance frequency from strategy
         self.rebalance_frequency = strategy.get('rebalance', 'daily')
         
@@ -854,27 +990,68 @@ class ComposerBacktester:
                 
                 selected_assets = self.evaluate_node(strategy, date)
                 
+                # CRITICAL FIX: Add comprehensive debugging
+                if debug_container and i < 10:
+                    with debug_container:
+                        st.write(f"Strategy evaluation result: {selected_assets}")
+                        st.write(f"Strategy structure: {strategy.get('step', 'No step')}")
+                        st.write(f"Strategy children count: {len(strategy.get('children', []))}")
+                        if strategy.get('children'):
+                            for j, child in enumerate(strategy.get('children', [])[:3]):  # Show first 3 children
+                                st.write(f"  Child {j}: {child.get('step', 'No step')} - {child.get('ticker', 'No ticker')}")
+                
+                # CRITICAL FIX: Fallback to all symbols if strategy evaluation fails
+                if not selected_assets:
+                    st.warning(f"Strategy evaluation returned no assets for {date.date()}, trying direct extraction...")
+                    selected_assets = self.extract_assets_directly(strategy)
+                    
+                    if not selected_assets:
+                        st.warning(f"Direct extraction also failed, falling back to all available symbols")
+                        selected_assets = list(self.data.keys())
+                    else:
+                        st.info(f"Direct extraction successful: {selected_assets}")
+                
                 # CRITICAL FIX: Implement proper weight calculation based on strategy type
                 new_holdings = {}
                 if selected_assets:
                     # Check if we have weight specification in the strategy
                     weight_strategy = self.get_weight_strategy(strategy)
                     
-                    if weight_strategy == 'equal':
+                    if weight_strategy == 'wt-cash-equal':
                         # Equal weight allocation
                         weight_per_asset = 1.0 / len(selected_assets)
                         for asset in selected_assets:
                             new_holdings[asset] = weight_per_asset
-                    elif weight_strategy == 'inverse_vol':
+                        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                            st.write(f"Equal weight allocation: {weight_per_asset:.3f} per asset")
+                    elif weight_strategy == 'wt-inverse-vol':
                         # Inverse volatility allocation
                         weights = self.calculate_inverse_vol_weights(selected_assets, date)
                         for asset, weight in zip(selected_assets, weights):
                             new_holdings[asset] = weight
+                        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                            st.write(f"Inverse volatility weights: {dict(zip(selected_assets, weights))}")
+                    elif weight_strategy == 'wt-cash-specified':
+                        # Specified weight allocation (fallback to equal)
+                        weight_per_asset = 1.0 / len(selected_assets)
+                        for asset in selected_assets:
+                            new_holdings[asset] = weight_per_asset
+                        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                            st.write(f"Specified weight allocation (fallback to equal): {weight_per_asset:.3f} per asset")
                     else:
                         # Default to equal weight
                         weight_per_asset = 1.0 / len(selected_assets)
                         for asset in selected_assets:
                             new_holdings[asset] = weight_per_asset
+                        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                            st.write(f"Default equal weight allocation: {weight_per_asset:.3f} per asset")
+                    
+                    # CRITICAL FIX: Ensure weights sum to 1.0
+                    total_weight = sum(new_holdings.values())
+                    if abs(total_weight - 1.0) > 0.001:
+                        st.warning(f"Weights don't sum to 1.0 (sum: {total_weight:.3f}), normalizing...")
+                        for asset in new_holdings:
+                            new_holdings[asset] /= total_weight
                 
                 if debug_container and i < 10:
                     with debug_container:
@@ -922,24 +1099,41 @@ class ComposerBacktester:
         return pd.DataFrame(results)
     
     def get_weight_strategy(self, strategy: Dict[str, Any]) -> str:
-        """Determine the weight strategy from the strategy configuration"""
+        """Determine the weight strategy from the strategy structure"""
         def check_node(node):
             if isinstance(node, dict):
-                step = node.get('step')
-                if step == 'wt-cash-equal':
-                    return 'equal'
-                elif step == 'wt-inverse-vol':
-                    return 'inverse_vol'
-                elif step == 'wt-cash-specified':
-                    return 'specified'
-                elif 'children' in node:
-                    for child in node['children']:
-                        result = check_node(child)
-                        if result:
-                            return result
+                step = node.get('step', '')
+                if step.startswith('wt-'):
+                    return step
+                for value in node.values():
+                    result = check_node(value)
+                    if result:
+                        return result
+            elif isinstance(node, list):
+                for item in node:
+                    result = check_node(item)
+                    if result:
+                        return result
             return None
         
-        return check_node(strategy) or 'equal'
+        weight_strategy = check_node(strategy)
+        
+        # CRITICAL FIX: If no weight strategy found, look for common patterns
+        if not weight_strategy:
+            # Look for equal weight patterns
+            if any('equal' in str(value).lower() for value in strategy.values()):
+                weight_strategy = 'wt-cash-equal'
+            # Look for inverse volatility patterns
+            elif any('vol' in str(value).lower() for value in strategy.values()):
+                weight_strategy = 'wt-inverse-vol'
+            # Default to equal weight
+            else:
+                weight_strategy = 'wt-cash-equal'
+        
+        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+            st.write(f"Weight strategy detected: {weight_strategy}")
+        
+        return weight_strategy
     
     def calculate_inverse_vol_weights(self, assets: List[str], date: pd.Timestamp) -> List[float]:
         """Calculate inverse volatility weights for assets"""
@@ -950,30 +1144,37 @@ class ComposerBacktester:
         volatilities = []
         for asset in assets:
             try:
-                # Get price data for the last 20 days
-                end_date = date
-                start_date = end_date - timedelta(days=30)
-                
-                if asset in self.data and not self.data[asset].empty:
-                    prices = self.data[asset][(self.data[asset].index >= start_date) & 
-                                           (self.data[asset].index <= end_date)]
-                    if len(prices) > 1:
-                        returns = prices.pct_change().dropna()
-                        vol = returns.std()
+                # Get price data for the asset
+                if asset in self.data:
+                    prices = self.data[asset]['Close']
+                    # Calculate rolling volatility (20-day)
+                    returns = prices.pct_change().dropna()
+                    if len(returns) >= 20:
+                        vol = returns.rolling(window=20).std().iloc[-1]
                         volatilities.append((asset, vol))
                     else:
-                        volatilities.append((asset, 1.0))  # Default volatility
+                        volatilities.append((asset, 0.1))  # Default volatility
                 else:
-                    volatilities.append((asset, 1.0))  # Default volatility
-            except Exception:
-                volatilities.append((asset, 1.0))  # Default volatility
-        
-        if not volatilities:
-            return [1.0 / len(assets)] * len(assets)
+                    volatilities.append((asset, 0.1))  # Default volatility
+            except Exception as e:
+                st.warning(f"Error calculating volatility for {asset}: {e}")
+                volatilities.append((asset, 0.1))  # Default volatility
         
         # Calculate inverse volatility weights
-        total_inverse_vol = sum(1.0 / vol for _, vol in volatilities)
-        weights = [(1.0 / vol) / total_inverse_vol for _, vol in volatilities]
+        total_inverse_vol = sum(1.0 / max(vol, 0.001) for _, vol in volatilities)
+        weights = []
+        
+        for asset, vol in volatilities:
+            weight = (1.0 / max(vol, 0.001)) / total_inverse_vol
+            weights.append(weight)
+        
+        # CRITICAL FIX: Ensure weights sum to 1.0
+        total_weight = sum(weights)
+        if total_weight > 0:
+            weights = [w / total_weight for w in weights]
+        
+        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+            st.write(f"Inverse volatility calculation: {dict(zip([a for a, _ in volatilities], weights))}")
         
         return weights
     
@@ -1038,158 +1239,258 @@ class ComposerBacktester:
             if 'Close' in df.columns:
                 close_prices = df['Close']
                 
-                # Debug: Check the type and structure of close_prices
-                if not isinstance(close_prices, (pd.Series, pd.DataFrame)):
-                    st.warning(f"⚠️ {symbol}: Close column is not a Series/DataFrame, type: {type(close_prices)}")
-                    continue
+                # Check for zero or negative prices
+                if (close_prices <= 0).any():
+                    st.warning(f"⚠️ {symbol}: Found zero or negative prices")
+                    validation_passed = False
                 
-                # If it's a DataFrame, take the first column
-                if isinstance(close_prices, pd.DataFrame):
-                    if len(close_prices.columns) > 0:
-                        close_prices = close_prices.iloc[:, 0]
-                    else:
-                        st.warning(f"⚠️ {symbol}: Close DataFrame has no columns")
-                        continue
-                
-                # Ensure close_prices is numeric and handle any NaN values
-                try:
-                    close_prices = pd.to_numeric(close_prices, errors='coerce')
-                    if close_prices is None or len(close_prices) == 0:
-                        st.warning(f"⚠️ {symbol}: No valid close price data after conversion")
-                        continue
-                        
-                    non_positive_mask = close_prices <= 0
-                    if non_positive_mask.any():
-                        st.error(f"❌ {symbol}: Found non-positive close prices")
-                        validation_passed = False
-                    
-                    # Check for extreme price movements (>50% in one day)
-                    daily_returns = close_prices.pct_change().abs()
-                    extreme_moves = daily_returns > 0.5
-                    if extreme_moves.any():
-                        extreme_dates = daily_returns[extreme_moves].index
-                        st.warning(f"⚠️ {symbol}: Extreme price movements on {len(extreme_dates)} days")
-                        
-                except Exception as e:
-                    st.error(f"❌ {symbol}: Error processing close prices: {str(e)}")
+                # Check for extreme price movements (>50% in one day)
+                daily_returns = close_prices.pct_change().abs()
+                if (daily_returns > 0.5).any():
+                    st.warning(f"⚠️ {symbol}: Found extreme daily returns (>50%)")
                     validation_passed = False
         
         if validation_passed:
-            st.success("✅ Data validation passed")
+            st.success("✅ Data quality validation passed")
         else:
-            st.error("❌ Data validation failed - some issues detected")
+            st.warning("⚠️ Data quality validation failed - some issues detected")
         
         return validation_passed
     
     def debug_strategy_evaluation(self, strategy: Dict[str, Any], date: pd.Timestamp) -> Dict[str, Any]:
-        """Debug strategy evaluation step by step"""
+        """Debug strategy evaluation for a specific date"""
         debug_info = {
-            'date': date.strftime('%Y-%m-%d'),
-            'strategy_structure': self.analyze_strategy_structure(strategy),
-            'evaluation_steps': [],
-            'final_result': None,
-            'data_quality': {}
+            'date': date,
+            'strategy_step': strategy.get('step', 'No step'),
+            'strategy_children_count': len(strategy.get('children', [])),
+            'evaluation_result': None,
+            'error': None
         }
         
-        # Check data quality for all symbols
-        symbols = self.extract_all_symbols(strategy)
-        for symbol in symbols:
-            if symbol in self.data:
-                df = self.data[symbol]
-                debug_info['data_quality'][symbol] = {
-                    'data_points': len(df),
-                    'date_range': f"{df.index.min().date()} to {df.index.max().date()}",
-                    'missing_values': df.isnull().sum().sum(),
-                    'has_ohlcv': all(col in df.columns for col in ['Open', 'High', 'Low', 'Close', 'Volume'])
-                }
-            else:
-                debug_info['data_quality'][symbol] = {'error': 'No data available'}
-        
-        # Step-by-step evaluation
         try:
+            # Try to evaluate the strategy
             result = self.evaluate_node(strategy, date)
-            debug_info['final_result'] = result
+            debug_info['evaluation_result'] = result
+            
+            # Analyze the strategy structure
+            if strategy.get('children'):
+                debug_info['children_analysis'] = []
+                for i, child in enumerate(strategy.get('children', [])[:5]):  # Limit to first 5
+                    child_info = {
+                        'index': i,
+                        'step': child.get('step', 'No step'),
+                        'ticker': child.get('ticker', 'No ticker'),
+                        'has_children': 'children' in child
+                    }
+                    debug_info['children_analysis'].append(child_info)
+            
+            # Check for common issues
+            issues = []
+            if not result:
+                issues.append("Strategy evaluation returned no assets")
+            if len(result) == 1:
+                issues.append("Strategy evaluation returned only one asset")
+            if len(result) > 10:
+                issues.append(f"Strategy evaluation returned {len(result)} assets (unusually high)")
+            
+            debug_info['issues'] = issues
+            
         except Exception as e:
-            debug_info['final_result'] = f"ERROR: {str(e)}"
+            debug_info['error'] = str(e)
+            debug_info['error_type'] = type(e).__name__
         
         return debug_info
     
     def analyze_strategy_structure(self, strategy: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze the structure of the strategy for debugging"""
+        """Analyze the structure of a strategy"""
         analysis = {
             'total_nodes': 0,
             'node_types': {},
-            'conditional_nodes': 0,
-            'filter_nodes': 0,
-            'weight_nodes': 0,
-            'asset_nodes': 0
+            'max_depth': 0,
+            'asset_nodes': [],
+            'conditional_nodes': [],
+            'filter_nodes': []
         }
         
         def analyze_recursive(node, depth=0):
+            analysis['total_nodes'] += 1
+            analysis['max_depth'] = max(analysis['max_depth'], depth)
+            
             if isinstance(node, dict):
-                analysis['total_nodes'] += 1
                 step = node.get('step', 'unknown')
                 analysis['node_types'][step] = analysis['node_types'].get(step, 0) + 1
                 
-                if step == 'if':
-                    analysis['conditional_nodes'] += 1
+                if step == 'asset' and 'ticker' in node:
+                    analysis['asset_nodes'].append({
+                        'ticker': node['ticker'],
+                        'depth': depth,
+                        'path': f"depth_{depth}"
+                    })
+                elif step == 'if':
+                    analysis['conditional_nodes'].append({
+                        'depth': depth,
+                        'children_count': len(node.get('children', []))
+                    })
                 elif step == 'filter':
-                    analysis['filter_nodes'] += 1
-                elif step.startswith('wt-'):
-                    analysis['weight_nodes'] += 1
-                elif step == 'asset':
-                    analysis['asset_nodes'] += 1
+                    analysis['filter_nodes'].append({
+                        'depth': depth,
+                        'sort_fn': node.get('sort-by-fn', 'unknown'),
+                        'select_n': node.get('select-n', 1)
+                    })
                 
-                if 'children' in node:
-                    for child in node['children']:
-                        analyze_recursive(child, depth + 1)
+                # Recursively analyze children
+                for key, value in node.items():
+                    if key != 'step':  # Avoid infinite recursion
+                        analyze_recursive(value, depth + 1)
+                        
+            elif isinstance(node, list):
+                for item in node:
+                    analyze_recursive(item, depth + 1)
         
         analyze_recursive(strategy)
         return analysis
     
     def validate_strategy_execution(self, strategy: Dict[str, Any], date: pd.Timestamp) -> Dict[str, Any]:
-        """Validate that strategy execution produces expected results"""
+        """Validate that the strategy can be executed for a given date"""
         validation = {
-            'date': date.strftime('%Y-%m-%d'),
+            'date': date,
+            'can_execute': False,
             'issues': [],
             'warnings': [],
-            'success': True
+            'data_availability': {}
         }
         
         try:
-            # Check if we can extract symbols
+            # Check if we have data for the date
             symbols = self.extract_all_symbols(strategy)
-            if not symbols:
-                validation['issues'].append("No symbols extracted from strategy")
-                validation['success'] = False
+            for symbol in symbols:
+                if symbol in self.data:
+                    df = self.data[symbol]
+                    if not df.empty:
+                        # Check if we have data for this specific date
+                        if date in df.index:
+                            validation['data_availability'][symbol] = 'available'
+                        else:
+                            # Find the closest available date
+                            available_dates = df.index
+                            if len(available_dates) > 0:
+                                closest_date = available_dates[available_dates <= date].max()
+                                if closest_date is not None:
+                                    days_diff = (date - closest_date).days
+                                    if days_diff <= 5:
+                                        validation['data_availability'][symbol] = f'closest_{days_diff}_days_ago'
+                                    else:
+                                        validation['data_availability'][symbol] = f'closest_{days_diff}_days_ago'
+                                        validation['warnings'].append(f"{symbol}: Data is {days_diff} days old")
+                                else:
+                                    validation['data_availability'][symbol] = 'no_data_before_date'
+                                    validation['issues'].append(f"{symbol}: No data available before {date.date()}")
+                            else:
+                                validation['data_availability'][symbol] = 'no_data'
+                                validation['issues'].append(f"{symbol}: No data available")
+                    else:
+                        validation['data_availability'][symbol] = 'empty_dataset'
+                        validation['issues'].append(f"{symbol}: Empty dataset")
+                else:
+                    validation['data_availability'][symbol] = 'missing'
+                    validation['issues'].append(f"{symbol}: No data downloaded")
             
-            # Check if we have data for all symbols
-            missing_data = [sym for sym in symbols if sym not in self.data]
-            if missing_data:
-                validation['issues'].append(f"Missing data for symbols: {missing_data}")
-                validation['success'] = False
+            # Try to evaluate the strategy
+            try:
+                result = self.evaluate_node(strategy, date)
+                if result:
+                    validation['can_execute'] = True
+                    validation['evaluation_result'] = result
+                else:
+                    validation['issues'].append("Strategy evaluation returned no assets")
+            except Exception as e:
+                validation['issues'].append(f"Strategy evaluation failed: {str(e)}")
             
-            # Check if strategy evaluation produces results
-            result = self.evaluate_node(strategy, date)
-            if not result:
-                validation['warnings'].append("Strategy evaluation produced no assets")
-            
-            # Validate that all returned assets have data
-            for asset in result:
-                if asset not in self.data:
-                    validation['issues'].append(f"Returned asset {asset} has no data")
-                    validation['success'] = False
-                elif self.data[asset].empty:
-                    validation['issues'].append(f"Returned asset {asset} has empty dataset")
-                    validation['success'] = False
-            
-            validation['evaluated_assets'] = result
+            # Check for critical issues
+            if validation['issues']:
+                validation['can_execute'] = False
             
         except Exception as e:
-            validation['issues'].append(f"Strategy execution error: {str(e)}")
-            validation['success'] = False
+            validation['issues'].append(f"Validation process failed: {str(e)}")
+            validation['can_execute'] = False
         
         return validation
+
+    def extract_assets_directly(self, strategy: Dict[str, Any]) -> List[str]:
+        """Extract assets directly from strategy structure as a fallback"""
+        assets = set()
+        
+        def extract_recursive(node):
+            if isinstance(node, dict):
+                # Look for asset nodes
+                if node.get('step') == 'asset' and 'ticker' in node:
+                    assets.add(node['ticker'])
+                
+                # Look for ticker fields in various node types
+                if 'ticker' in node:
+                    ticker = node['ticker']
+                    if isinstance(ticker, str) and len(ticker) <= 10:
+                        assets.add(ticker)
+                
+                # Recursively process all values
+                for value in node.values():
+                    extract_recursive(value)
+                    
+            elif isinstance(node, list):
+                for item in node:
+                    extract_recursive(item)
+        
+        extract_recursive(strategy)
+        
+        # Filter out non-ticker symbols
+        filtered_assets = []
+        for asset in assets:
+            if (asset and 
+                not any(indicator in asset.lower() for indicator in ['rsi', 'sma', 'ema', 'macd', 'bb', 'stoch', 'atr', 'vol', 'mom', 'price', 'close', 'high', 'low']) and
+                not asset.startswith('$') and
+                len(asset) <= 10):
+                filtered_assets.append(asset)
+        
+        return filtered_assets
+
+    def find_root_strategy(self, strategy: Dict[str, Any]) -> Dict[str, Any]:
+        """Find the root strategy node, handling different nesting structures"""
+        # If this looks like a root strategy, return it
+        if strategy.get('step') in ['root', 'wt-cash-equal', 'wt-cash-specified', 'wt-inverse-vol']:
+            return strategy
+        
+        # If this has children but no step, it might be the root
+        if 'children' in strategy and 'step' not in strategy:
+            return strategy
+        
+        # Look for nested strategy structures
+        def find_nested_strategy(node):
+            if isinstance(node, dict):
+                if node.get('step') in ['root', 'wt-cash-equal', 'wt-cash-specified', 'wt-inverse-vol']:
+                    return node
+                for key, value in node.items():
+                    if key == 'strategy' or key == 'symphony':
+                        result = find_nested_strategy(value)
+                        if result:
+                            return result
+                    elif isinstance(value, (dict, list)):
+                        result = find_nested_strategy(value)
+                        if result:
+                            return result
+            elif isinstance(node, list):
+                for item in node:
+                    result = find_nested_strategy(item)
+                    if result:
+                        return result
+            return None
+        
+        # Try to find nested strategy
+        nested = find_nested_strategy(strategy)
+        if nested:
+            return nested
+        
+        # If all else fails, return the original strategy
+        return strategy
 
 def compare_allocations(inhouse_results: pd.DataFrame, composer_allocations: pd.DataFrame, 
                        composer_tickers: List[str], start_date, end_date) -> pd.DataFrame:
@@ -1778,7 +2079,7 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
             'Date_Alignment_Status': '✅ Aligned' if pd.Timestamp(start_date) >= pd.Timestamp(composer_data['start_date']) and pd.Timestamp(end_date) <= pd.Timestamp(composer_data['end_date']) else '⚠️ Extended beyond available data'
         },
         'Daily_Summary': comparison_results[['Date', 'Asset_Selection_Match', 'Rebalanced', 'InHouse_Num_Assets', 'Composer_Num_Assets']].copy().assign(
-            Date=lambda x: safe_date_format(x['Date'])
+            Date=lambda x: x['Date'].apply(safe_date_format)
         ).to_dict('records'),
         'Ticker_Summary': ticker_comparison_df.groupby('Ticker').agg({
             'Selection_Match': 'mean',
