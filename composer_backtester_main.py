@@ -2,13 +2,26 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import json
-import yfinance as yf
 from datetime import datetime, timedelta
-import plotly.graph_objects as go
-import plotly.express as px
 from typing import Dict, List, Any, Tuple
 import warnings
 warnings.filterwarnings('ignore')
+
+# Try to import optional dependencies
+try:
+    import yfinance as yf
+    HAS_YFINANCE = True
+except ImportError:
+    HAS_YFINANCE = False
+    st.error("❌ yfinance not installed. Please install it with: `pip install yfinance`")
+
+try:
+    import plotly.graph_objects as go
+    import plotly.express as px
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
+    st.error("❌ plotly not installed. Please install it with: `pip install plotly`")
 
 # Page config
 st.set_page_config(
@@ -25,6 +38,10 @@ class ComposerBacktester:
         
     def download_data(self, symbols: List[str], start_date: str, end_date: str) -> Dict[str, pd.DataFrame]:
         """Download price data for all symbols"""
+        if not HAS_YFINANCE:
+            st.error("yfinance is required for data download. Please install it.")
+            return {}
+            
         data = {}
         progress_bar = st.progress(0)
         
@@ -98,6 +115,10 @@ class ComposerBacktester:
         if condition['step'] != 'if-child':
             return False
             
+        # Skip else conditions in this function
+        if condition.get('is-else-condition?', False):
+            return False
+            
         lhs_fn = condition.get('lhs-fn')
         rhs_fn = condition.get('rhs-fn') 
         lhs_val = condition.get('lhs-val')
@@ -107,18 +128,27 @@ class ComposerBacktester:
         rhs_window = condition.get('rhs-window-days', condition.get('rhs-fn-params', {}).get('window', 14))
         rhs_fixed = condition.get('rhs-fixed-value?', False)
         
-        # Get left-hand side value
+        # Convert string windows to integers
         if isinstance(lhs_window, str):
             lhs_window = int(lhs_window)
+        if isinstance(rhs_window, str):
+            rhs_window = int(rhs_window)
+        
+        # Get left-hand side value
         lhs_value = self.get_indicator_value(lhs_val, lhs_fn, lhs_window, date)
         
         # Get right-hand side value
         if rhs_fixed:
-            rhs_value = float(rhs_val)
+            try:
+                rhs_value = float(rhs_val)
+            except (ValueError, TypeError):
+                return False
         else:
-            if isinstance(rhs_window, str):
-                rhs_window = int(rhs_window)
             rhs_value = self.get_indicator_value(rhs_val, rhs_fn, rhs_window, date)
+        
+        # Debug output
+        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+            st.write(f"Debug: {date.date()} - {lhs_fn}({lhs_val}, {lhs_window}) = {lhs_value:.2f} {comparator} {rhs_value:.2f}")
         
         # Compare values
         if pd.isna(lhs_value) or pd.isna(rhs_value):
@@ -179,18 +209,25 @@ class ComposerBacktester:
             if not children:
                 return []
                 
-            # Find the condition that matches
+            # Process if-child nodes in order
+            else_child = None
             for child in children:
                 if child.get('step') == 'if-child':
                     is_else = child.get('is-else-condition?', False)
                     
                     if is_else:
-                        # This is the else condition - execute if we reach here
-                        return self.evaluate_children(child.get('children', []), date)
+                        # Store else condition for later
+                        else_child = child
                     else:
                         # Evaluate condition
                         if self.evaluate_condition(child, date):
-                            return self.evaluate_children(child.get('children', []), date)
+                            result = self.evaluate_children(child.get('children', []), date)
+                            if result:  # Only return if we got assets
+                                return result
+            
+            # If no condition matched and we have an else, execute it
+            if else_child:
+                return self.evaluate_children(else_child.get('children', []), date)
             
             return []
         
@@ -203,6 +240,10 @@ class ComposerBacktester:
             return self.apply_filter(assets, node, date)
         
         elif step in ['wt-cash-equal', 'wt-cash-specified', 'wt-inverse-vol', 'group']:
+            return self.evaluate_children(node.get('children', []), date)
+        
+        elif step == 'root':
+            # Handle root node
             return self.evaluate_children(node.get('children', []), date)
         
         return []
@@ -251,45 +292,88 @@ class ComposerBacktester:
             st.error("No data downloaded. Please check your symbols and date range.")
             return pd.DataFrame()
         
-        # Get trading dates
-        sample_data = next(iter(self.data.values()))
-        trading_dates = sample_data.index
+        # Get trading dates from the longest available dataset
+        all_dates = []
+        for symbol_data in self.data.values():
+            all_dates.extend(symbol_data.index.tolist())
+        
+        trading_dates = sorted(list(set(all_dates)))
+        trading_dates = pd.DatetimeIndex(trading_dates)
+        
+        # Filter to requested date range
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+        trading_dates = trading_dates[(trading_dates >= start_ts) & (trading_dates <= end_ts)]
+        
+        if len(trading_dates) == 0:
+            st.error("No trading dates found in the specified range.")
+            return pd.DataFrame()
+        
+        st.info(f"Backtesting over {len(trading_dates)} trading days...")
         
         # Run backtest
         results = []
         portfolio_value = self.cash
+        prev_portfolio_value = self.cash
         
         progress_bar = st.progress(0)
         
+        # Add debug container
+        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+            debug_container = st.container()
+        else:
+            debug_container = None
+        
         for i, date in enumerate(trading_dates):
             self.current_date = date
+            
+            if debug_container and i < 5:  # Show debug for first 5 days
+                with debug_container:
+                    st.write(f"\n**Date: {date.date()}**")
             
             # Evaluate strategy for this date
             selected_assets = self.evaluate_node(strategy, date)
             
             # Calculate portfolio value (simplified - equal weight)
-            if selected_assets:
+            if selected_assets and i > 0:
                 daily_returns = []
                 for asset in selected_assets:
-                    if asset in self.data and date in self.data[asset].index:
-                        if i > 0:  # Need previous day for return calculation
-                            prev_date = trading_dates[i-1]
-                            if prev_date in self.data[asset].index:
-                                curr_price = self.data[asset].loc[date, 'Close']
-                                prev_price = self.data[asset].loc[prev_date, 'Close']
+                    if asset in self.data:
+                        # Find the closest available date
+                        asset_data = self.data[asset]
+                        available_dates = asset_data.index[asset_data.index <= date]
+                        if len(available_dates) > 0:
+                            current_date = available_dates[-1]
+                            
+                            # Find previous date
+                            prev_available_dates = asset_data.index[asset_data.index < current_date]
+                            if len(prev_available_dates) > 0:
+                                prev_date = prev_available_dates[-1]
+                                
+                                curr_price = asset_data.loc[current_date, 'Close']
+                                prev_price = asset_data.loc[prev_date, 'Close']
                                 daily_return = (curr_price - prev_price) / prev_price
                                 daily_returns.append(daily_return)
                 
                 if daily_returns:
                     avg_return = np.mean(daily_returns)
-                    portfolio_value *= (1 + avg_return)
+                    portfolio_value = prev_portfolio_value * (1 + avg_return)
+                else:
+                    portfolio_value = prev_portfolio_value
+            
+            prev_portfolio_value = portfolio_value
             
             results.append({
                 'Date': date,
                 'Portfolio_Value': portfolio_value,
-                'Selected_Assets': ', '.join(selected_assets),
+                'Selected_Assets': ', '.join(selected_assets) if selected_assets else 'None',
                 'Num_Assets': len(selected_assets)
             })
+            
+            if debug_container and i < 5:  # Show debug for first 5 days
+                with debug_container:
+                    st.write(f"Selected: {selected_assets}")
+                    st.write(f"Portfolio Value: ${portfolio_value:,.2f}")
             
             progress_bar.progress((i + 1) / len(trading_dates))
         
@@ -316,6 +400,9 @@ def main():
         
         # Initial capital
         initial_capital = st.number_input("Initial Capital ($)", value=100000, min_value=1000)
+        
+        # Debug mode
+        debug_mode = st.checkbox("Debug Mode", help="Show detailed condition evaluation")
     
     if uploaded_file is not None:
         try:
@@ -339,6 +426,11 @@ def main():
             
             # Run backtest button
             if st.button("🚀 Run Backtest", type="primary"):
+                if not HAS_YFINANCE:
+                    st.error("Cannot run backtest without yfinance. Please install required dependencies.")
+                    st.code("pip install yfinance plotly")
+                    return
+                    
                 backtester = ComposerBacktester()
                 backtester.cash = initial_capital
                 
@@ -370,24 +462,27 @@ def main():
                         st.metric("Max Drawdown", f"{max_dd:.2f}%")
                     
                     # Portfolio value chart
-                    st.subheader("Portfolio Performance")
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(
-                        x=results['Date'],
-                        y=results['Portfolio_Value'],
-                        mode='lines',
-                        name='Portfolio Value',
-                        line=dict(color='#1f77b4', width=2)
-                    ))
-                    
-                    fig.update_layout(
-                        title="Portfolio Value Over Time",
-                        xaxis_title="Date",
-                        yaxis_title="Portfolio Value ($)",
-                        hovermode='x unified'
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
+                    if HAS_PLOTLY:
+                        st.subheader("Portfolio Performance")
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(
+                            x=results['Date'],
+                            y=results['Portfolio_Value'],
+                            mode='lines',
+                            name='Portfolio Value',
+                            line=dict(color='#1f77b4', width=2)
+                        ))
+                        
+                        fig.update_layout(
+                            title="Portfolio Value Over Time",
+                            xaxis_title="Date",
+                            yaxis_title="Portfolio Value ($)",
+                            hovermode='x unified'
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.line_chart(results.set_index('Date')['Portfolio_Value'])
                     
                     # Asset allocation over time
                     st.subheader("Asset Selection Over Time")
