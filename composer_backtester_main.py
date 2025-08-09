@@ -452,6 +452,12 @@ class ComposerBacktester:
     
     def get_indicator_value(self, symbol: str, indicator: str, window: int, date: pd.Timestamp) -> float:
         """Get indicator value for a symbol at a specific date"""
+        # Ensure window is an integer
+        try:
+            window = int(window) if window is not None else 14
+        except (ValueError, TypeError):
+            window = 14  # Default fallback
+            
         if symbol not in self.data:
             if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
                 st.write(f"Symbol {symbol} not found in data")
