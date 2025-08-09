@@ -35,8 +35,28 @@ class ComposerBacktester:
         self.data = {}
         self.current_date = None
         self.cash = 100000  # Starting capital
+        self.rebalance_frequency = 'daily'
+        self.current_holdings = {}
+        self.last_rebalance_date = None
         
-    def download_data(self, symbols: List[str], start_date: str, end_date: str) -> Dict[str, pd.DataFrame]:
+    def should_rebalance(self, date: pd.Timestamp) -> bool:
+        """Check if we should rebalance on this date"""
+        if self.last_rebalance_date is None:
+            return True
+            
+        if self.rebalance_frequency == 'daily':
+            return True
+        elif self.rebalance_frequency == 'weekly':
+            # Rebalance on Mondays
+            return date.weekday() == 0
+        elif self.rebalance_frequency == 'monthly':
+            # Rebalance on first trading day of month
+            return (date.month != self.last_rebalance_date.month or 
+                   date.year != self.last_rebalance_date.year)
+        elif self.rebalance_frequency == 'none':
+            return False
+        
+        return True
         """Download price data for all symbols"""
         if not HAS_YFINANCE:
             st.error("yfinance is required for data download. Please install it.")
@@ -57,7 +77,42 @@ class ComposerBacktester:
         progress_bar.empty()
         return data
     
-    def calculate_rsi(self, prices: pd.Series, window: int = 14) -> pd.Series:
+    def calculate_portfolio_return(self, current_holdings: Dict[str, float], new_holdings: Dict[str, float], 
+                                 date: pd.Timestamp, prev_date: pd.Timestamp) -> float:
+        """Calculate portfolio return considering actual holdings and transitions"""
+        if not current_holdings:
+            return 0.0
+            
+        total_return = 0.0
+        total_weight = 0.0
+        
+        for asset, weight in current_holdings.items():
+            if asset in self.data:
+                asset_data = self.data[asset]
+                
+                # Get prices
+                curr_price = self.get_asset_price(asset, date)
+                prev_price = self.get_asset_price(asset, prev_date)
+                
+                if curr_price and prev_price and curr_price > 0 and prev_price > 0:
+                    asset_return = (curr_price - prev_price) / prev_price
+                    total_return += weight * asset_return
+                    total_weight += weight
+        
+        return total_return / total_weight if total_weight > 0 else 0.0
+    
+    def get_asset_price(self, symbol: str, date: pd.Timestamp) -> float:
+        """Get asset price at specific date"""
+        if symbol not in self.data:
+            return None
+            
+        df = self.data[symbol]
+        available_dates = df.index[df.index <= date]
+        if len(available_dates) == 0:
+            return None
+            
+        actual_date = available_dates[-1]
+        return float(df.loc[actual_date, 'Close'])
         """Calculate RSI indicator"""
         delta = prices.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -317,9 +372,13 @@ class ComposerBacktester:
     
     def run_backtest(self, strategy: Dict[str, Any], start_date: str, end_date: str) -> pd.DataFrame:
         """Run the backtest"""
+        # Set rebalance frequency from strategy
+        self.rebalance_frequency = strategy.get('rebalance', 'daily')
+        
         # Extract all symbols
         symbols = self.extract_all_symbols(strategy)
         st.info(f"Found {len(symbols)} unique symbols: {', '.join(sorted(symbols))}")
+        st.info(f"Rebalance frequency: {self.rebalance_frequency}")
         
         # Download data
         st.info("Downloading price data...")
@@ -348,10 +407,11 @@ class ComposerBacktester:
         
         st.info(f"Backtesting over {len(trading_dates)} trading days...")
         
-        # Run backtest
+        # Initialize backtest
         results = []
         portfolio_value = self.cash
-        prev_portfolio_value = self.cash
+        self.current_holdings = {}
+        self.last_rebalance_date = None
         
         progress_bar = st.progress(0)
         
@@ -364,53 +424,53 @@ class ComposerBacktester:
         for i, date in enumerate(trading_dates):
             self.current_date = date
             
-            if debug_container and i < 5:  # Show debug for first 5 days
+            if debug_container and i < 10:  # Show debug for first 10 days
                 with debug_container:
                     st.write(f"\n**Date: {date.date()}**")
             
-            # Evaluate strategy for this date
-            selected_assets = self.evaluate_node(strategy, date)
+            # Check if we should rebalance
+            should_rebalance = self.should_rebalance(date)
             
-            # Calculate portfolio value (simplified - equal weight)
-            if selected_assets and i > 0:
-                daily_returns = []
-                for asset in selected_assets:
-                    if asset in self.data:
-                        # Find the closest available date
-                        asset_data = self.data[asset]
-                        available_dates = asset_data.index[asset_data.index <= date]
-                        if len(available_dates) > 0:
-                            current_date = available_dates[-1]
-                            
-                            # Find previous date
-                            prev_available_dates = asset_data.index[asset_data.index < current_date]
-                            if len(prev_available_dates) > 0:
-                                prev_date = prev_available_dates[-1]
-                                
-                                curr_price = asset_data.loc[current_date, 'Close']
-                                prev_price = asset_data.loc[prev_date, 'Close']
-                                daily_return = (curr_price - prev_price) / prev_price
-                                daily_returns.append(daily_return)
+            if should_rebalance:
+                # Evaluate strategy for this date to get new allocation
+                selected_assets = self.evaluate_node(strategy, date)
                 
-                if daily_returns:
-                    avg_return = np.mean(daily_returns)
-                    portfolio_value = prev_portfolio_value * (1 + avg_return)
-                else:
-                    portfolio_value = prev_portfolio_value
+                # Create new holdings (equal weight)
+                new_holdings = {}
+                if selected_assets:
+                    weight_per_asset = 1.0 / len(selected_assets)
+                    for asset in selected_assets:
+                        new_holdings[asset] = weight_per_asset
+                
+                if debug_container and i < 10:
+                    with debug_container:
+                        st.write(f"Rebalancing to: {selected_assets}")
+                        st.write(f"New holdings: {new_holdings}")
+                
+                self.current_holdings = new_holdings
+                self.last_rebalance_date = date
             
-            prev_portfolio_value = portfolio_value
+            # Calculate portfolio return since last day
+            if i > 0:
+                prev_date = trading_dates[i-1]
+                daily_return = self.calculate_portfolio_return(
+                    self.current_holdings, {}, date, prev_date
+                )
+                portfolio_value *= (1 + daily_return)
+                
+                if debug_container and i < 10:
+                    with debug_container:
+                        st.write(f"Daily return: {daily_return:.4f}")
+                        st.write(f"Portfolio value: ${portfolio_value:,.2f}")
             
             results.append({
                 'Date': date,
                 'Portfolio_Value': portfolio_value,
-                'Selected_Assets': ', '.join(selected_assets) if selected_assets else 'None',
-                'Num_Assets': len(selected_assets)
+                'Selected_Assets': ', '.join(self.current_holdings.keys()) if self.current_holdings else 'None',
+                'Num_Assets': len(self.current_holdings),
+                'Rebalanced': should_rebalance,
+                'Holdings': dict(self.current_holdings)
             })
-            
-            if debug_container and i < 5:  # Show debug for first 5 days
-                with debug_container:
-                    st.write(f"Selected: {selected_assets}")
-                    st.write(f"Portfolio Value: ${portfolio_value:,.2f}")
             
             progress_bar.progress((i + 1) / len(trading_dates))
         
@@ -485,6 +545,23 @@ def main():
                     
                     final_value = results['Portfolio_Value'].iloc[-1]
                     total_return = (final_value - initial_capital) / initial_capital * 100
+                    days_elapsed = (end_date - start_date).days
+                    years_elapsed = days_elapsed / 365.25
+                    
+                    # Calculate more accurate metrics
+                    daily_returns = results['Portfolio_Value'].pct_change().dropna()
+                    volatility = daily_returns.std() * np.sqrt(252) * 100  # Annualized volatility
+                    
+                    # Sharpe ratio (assuming 0% risk-free rate)
+                    if volatility > 0:
+                        sharpe_ratio = (total_return / years_elapsed) / volatility
+                    else:
+                        sharpe_ratio = 0
+                    
+                    # Max drawdown
+                    running_max = results['Portfolio_Value'].cummax()
+                    drawdown = (results['Portfolio_Value'] - running_max) / running_max
+                    max_drawdown = drawdown.min() * 100
                     
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
@@ -492,11 +569,26 @@ def main():
                     with col2:
                         st.metric("Total Return", f"{total_return:.2f}%")
                     with col3:
-                        st.metric("Annualized Return", f"{(total_return / ((end_date - start_date).days / 365)):.2f}%")
+                        if years_elapsed > 0:
+                            annualized_return = ((final_value / initial_capital) ** (1/years_elapsed) - 1) * 100
+                            st.metric("Annualized Return", f"{annualized_return:.2f}%")
+                        else:
+                            st.metric("Annualized Return", "N/A")
                     with col4:
-                        max_value = results['Portfolio_Value'].max()
-                        max_dd = ((results['Portfolio_Value'] / results['Portfolio_Value'].cummax() - 1).min() * 100)
-                        st.metric("Max Drawdown", f"{max_dd:.2f}%")
+                        st.metric("Max Drawdown", f"{max_drawdown:.2f}%")
+                    
+                    # Additional metrics
+                    col5, col6, col7, col8 = st.columns(4)
+                    with col5:
+                        st.metric("Volatility (Ann.)", f"{volatility:.2f}%")
+                    with col6:
+                        st.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
+                    with col7:
+                        rebalance_count = results['Rebalanced'].sum()
+                        st.metric("Rebalances", f"{rebalance_count}")
+                    with col8:
+                        win_rate = (daily_returns > 0).mean() * 100
+                        st.metric("Win Rate", f"{win_rate:.1f}%")
                     
                     # Portfolio value chart
                     if HAS_PLOTLY:
