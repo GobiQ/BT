@@ -78,20 +78,35 @@ def fetch_composer_backtest(symphony_url: str, start_date: str, end_date: str) -
     
     # Extract allocations
     allocations = data["tdvm_weights"]
-    date_range = pd.date_range(start=start_date, end=end_date)
-    df = pd.DataFrame(0.0, index=date_range, columns=tickers)
+    
+    # Create date range that aligns with trading days
+    start_dt = pd.Timestamp(start_date)
+    end_dt = pd.Timestamp(end_date)
+    
+    # Get all unique dates from allocation data first
+    all_dates = set()
+    for ticker in allocations:
+        for date_int in allocations[ticker]:
+            trading_date = convert_trading_date(date_int)
+            if start_dt <= trading_date <= end_dt:
+                all_dates.add(trading_date)
+    
+    # Create DataFrame with only actual trading dates
+    trading_dates = sorted(all_dates)
+    df = pd.DataFrame(0.0, index=trading_dates, columns=tickers)
     
     for ticker in allocations:
         for date_int in allocations[ticker]:
             trading_date = convert_trading_date(date_int)
-            percent = allocations[ticker][date_int]
             if trading_date in df.index:
-                # CRITICAL FIX: Composer returns percentages as decimals (0.01 = 1%)
-                # Convert to proper decimal format (0.01 -> 1.0)
-                if percent > 0 and percent < 0.1:  # Likely a percentage
+                percent = allocations[ticker][date_int]
+                
+                # ENHANCED: Better percentage handling
+                if 0 < percent < 1:  # Likely decimal format (0.01 = 1%)
                     df.at[trading_date, ticker] = percent * 100.0
-                else:
+                elif percent >= 1:  # Already percentage format
                     df.at[trading_date, ticker] = percent
+                # else: keep as 0
     
     return df, symphony_name, tickers
 
@@ -466,59 +481,61 @@ class ComposerBacktester:
             return str(date_obj)
     
     def get_indicator_value(self, symbol: str, indicator: str, window: int, date: pd.Timestamp) -> float:
-        """Get indicator value for a symbol at a specific date"""
-        # Ensure window is an integer
+        """Get indicator value for a symbol at a specific date with improved data handling"""
+        
+        # Ensure window is valid
         try:
             window = int(window) if window is not None else 14
+            window = max(1, window)  # Ensure positive window
         except (ValueError, TypeError):
-            window = 14  # Default fallback
+            window = 14
             
         if symbol not in self.data:
-            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                st.write(f"Symbol {symbol} not found in data")
             return np.nan
             
         df = self.data[symbol]
         if df.empty:
             return np.nan
             
-        # Find the closest previous date
+        # Find the closest previous date with more robust matching
         available_dates = df.index[df.index <= date]
         if len(available_dates) == 0:
-            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                st.write(f"No data available for {symbol} before {date}")
             return np.nan
         actual_date = available_dates[-1]
         
-        # CRITICAL FIX: Ensure we have enough data for the indicator
-        if len(df) < window + 10:  # Add buffer for calculation stability
+        # Enhanced data sufficiency check
+        data_before_date = df.loc[df.index <= actual_date]
+        if len(data_before_date) < window + 5:  # Need buffer for stability
             if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                st.write(f"Insufficient data for {indicator} on {symbol}: {len(df)} points, need {window + 10}")
+                st.write(f"⚠️ Insufficient data for {indicator} on {symbol}: {len(data_before_date)} points, need {window + 5}")
             return np.nan
         
         try:
+            # Calculate indicator using only data up to actual_date
+            price_series = data_before_date['Close']
+            
             if indicator == 'relative-strength-index':
-                values = self.calculate_rsi(df['Close'], window)
+                values = self.calculate_rsi(price_series, window)
             elif indicator == 'moving-average-price':
-                values = self.calculate_sma(df['Close'], window)
+                values = self.calculate_sma(price_series, window)
             elif indicator == 'exponential-moving-average':
-                values = self.calculate_ema(df['Close'], window)
+                values = self.calculate_ema(price_series, window)
             elif indicator == 'current-price':
-                return float(df.loc[actual_date, 'Close'])
+                return float(price_series.iloc[-1])
             elif indicator == 'cumulative-return':
-                values = self.calculate_cumulative_return(df['Close'], window)
+                values = self.calculate_cumulative_return(price_series, window)
             elif indicator == 'max-drawdown':
-                values = self.calculate_max_drawdown(df['Close'], window)
+                values = self.calculate_max_drawdown(price_series, window)
             elif indicator == 'volatility':
-                values = self.calculate_volatility(df['Close'], window)
+                values = self.calculate_volatility(price_series, window)
             elif indicator == 'momentum':
-                values = self.calculate_momentum(df['Close'], window)
+                values = self.calculate_momentum(price_series, window)
             elif indicator == 'bollinger-bands':
-                bb_data = self.calculate_bollinger_bands(df['Close'], window)
+                bb_data = self.calculate_bollinger_bands(price_series, window)
                 # Return middle band (SMA) by default, can be extended for upper/lower
                 values = bb_data['middle']
             elif indicator == 'macd':
-                macd_data = self.calculate_macd(df['Close'], 12, 26, 9)
+                macd_data = self.calculate_macd(price_series, 12, 26, 9)
                 # Return MACD line by default
                 values = macd_data['macd']
             elif indicator == 'stochastic':
@@ -608,9 +625,9 @@ class ComposerBacktester:
         except (ValueError, TypeError):
             return False
         
-        # Debug output
+        # Enhanced debug output
         if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-            st.write(f"Debug: {date.date()} - {lhs_fn}({lhs_val}, {lhs_window}) = {lhs_value:.2f} {comparator} {rhs_value:.2f}")
+            st.write(f"🔍 Condition: {lhs_fn}({lhs_val}, {lhs_window}) = {lhs_value:.4f} {comparator} {rhs_value:.4f}")
         
         # Compare values
         if comparator == 'gt':
@@ -624,10 +641,12 @@ class ComposerBacktester:
         elif comparator == 'eq':
             result = abs(lhs_value - rhs_value) < 0.0001
         else:
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"❌ Unknown comparator: {comparator}")
             result = False
         
         if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-            st.write(f"  → Result: {result}")
+            st.write(f"  → Result: {result} ({'TRUE' if result else 'FALSE'})")
         
         return bool(result)
     
@@ -696,8 +715,11 @@ class ComposerBacktester:
         return selected
     
     def evaluate_node(self, node: Dict[str, Any], date: pd.Timestamp) -> List[str]:
-        """Recursively evaluate strategy nodes"""
+        """Recursively evaluate strategy nodes with enhanced debugging"""
         step = node.get('step')
+        
+        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+            st.write(f"🔍 Evaluating node: {step} on {date.date()}")
         
         if step == 'asset':
             return [node['ticker']]
@@ -705,31 +727,34 @@ class ComposerBacktester:
         elif step == 'if':
             children = node.get('children', [])
             if not children:
+                if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                    st.write(f"❌ IF node has no children")
                 return []
                 
             # Process if-child nodes in order
-            else_child = None
             for child in children:
                 if child.get('step') == 'if-child':
                     is_else = child.get('is-else-condition?', False)
                     
-                    if is_else:
-                        # Store else condition for later
-                        else_child = child
-                    else:
-                        # Evaluate condition
-                        if self.evaluate_condition(child, date):
+                    if not is_else:
+                        # Evaluate condition with detailed logging
+                        condition_result = self.evaluate_condition(child, date)
+                        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                            st.write(f"🔍 Condition result: {condition_result}")
+                        
+                        if condition_result:
                             result = self.evaluate_children(child.get('children', []), date)
                             if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                                st.write(f"IF condition TRUE, selected: {result}")
+                                st.write(f"✅ IF condition TRUE, selected: {result}")
                             return result
             
-            # If no condition matched and we have an else, execute it
-            if else_child:
-                result = self.evaluate_children(else_child.get('children', []), date)
-                if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
-                    st.write(f"ELSE condition executed, selected: {result}")
-                return result
+            # Handle else condition
+            for child in children:
+                if child.get('step') == 'if-child' and child.get('is-else-condition?', False):
+                    result = self.evaluate_children(child.get('children', []), date)
+                    if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                        st.write(f"🔄 ELSE condition executed, selected: {result}")
+                    return result
             
             return []
         
@@ -1589,12 +1614,17 @@ def compare_allocations(inhouse_results: pd.DataFrame, composer_allocations: pd.
             except:
                 inhouse_holdings = {}
         
+        # FIX: Get only ACTIVE composer assets (weight > threshold)
         composer_holdings = {}
+        WEIGHT_THRESHOLD = 0.001  # Consider allocations above 0.1%
+        
         for ticker in composer_tickers:
             if ticker in composer_row.index:
-                composer_holdings[ticker] = composer_row[ticker]
+                weight = composer_row[ticker] / 100  # Convert % to decimal
+                if weight > WEIGHT_THRESHOLD:  # Only include meaningful allocations
+                    composer_holdings[ticker] = weight
         
-        # Convert to sets for comparison
+        # Convert to sets for comparison using ACTIVE allocations only
         inhouse_assets = set(inhouse_holdings.keys()) if inhouse_holdings else set()
         composer_assets = set(composer_holdings.keys()) if composer_holdings else set()
         
@@ -2466,6 +2496,10 @@ def main():
     st.title("📈 Composer Strategy Backtester")
     st.markdown("Compare your in-house strategy logic with Composer's actual allocations")
     
+    # Initialize debug mode in session state
+    if 'debug_mode' not in st.session_state:
+        st.session_state.debug_mode = False
+    
     # NEW: Prominent unified workflow section
     st.markdown("---")
     st.markdown("## 🚀 **Single Button Workflow - Run Both Backtests & Compare!**")
@@ -2514,14 +2548,17 @@ def main():
     with st.sidebar:
         st.header("Settings")
         
-        # Debug mode toggle
-        debug_mode = st.checkbox("🐛 Debug Mode", value=False, 
-                                help="Enable detailed logging for troubleshooting")
+        # Debug mode toggle - CRITICAL FOR TROUBLESHOOTING
+        st.markdown("### 🐛 **Debug Mode - CRITICAL FOR TROUBLESHOOTING**")
+        debug_mode = st.checkbox("Enable Debug Mode", value=False, 
+                                help="🔍 Enable detailed logging to see step-by-step strategy evaluation")
         if debug_mode:
             st.session_state.debug_mode = True
-            st.sidebar.info("Debug mode enabled - detailed logs will be shown")
+            st.sidebar.success("✅ Debug mode enabled - detailed logs will be shown")
+            st.sidebar.info("🔍 You'll now see detailed strategy evaluation steps")
         else:
             st.session_state.debug_mode = False
+            st.sidebar.info("ℹ️ Debug mode disabled - enable for troubleshooting")
         
         # Data source selection - allow both
         st.subheader("Data Sources")
@@ -3158,6 +3195,49 @@ def main():
             - ✅ Nested conditional logic (if-else)
             - ✅ Multiple asset classes
             - ✅ Direct Composer URL fetching
+            """)
+        
+        # CRITICAL: Add troubleshooting guide
+        with st.expander("🚨 **CRITICAL TROUBLESHOOTING GUIDE**", expanded=False):
+            st.markdown("""
+            ## 🔧 **If You're Still Getting Mismatches After Fixes**
+            
+            **1. Enable Debug Mode First** 🐛
+            - Check the "Enable Debug Mode" checkbox in the sidebar
+            - This will show you step-by-step strategy evaluation
+            
+            **2. Check These Common Issues:**
+            
+            **Asset Selection Mismatch:**
+            - Your strategy might be selecting different assets than expected
+            - Look for conditional logic that might be evaluating differently
+            - Check if technical indicators (RSI, SMA, etc.) are calculating correctly
+            
+            **Date Alignment Issues:**
+            - Ensure both backtests use the same date range
+            - Check if there are missing trading days in your data
+            
+            **Technical Indicator Problems:**
+            - RSI, SMA, EMA calculations might differ from Composer
+            - Window parameters might be interpreted differently
+            - Data quality issues (missing OHLC data)
+            
+            **3. Debug Output to Look For:**
+            - 🔍 **Evaluating node**: Shows which strategy step is being processed
+            - 🔍 **Condition result**: Shows if conditions are TRUE/FALSE
+            - ✅ **IF condition TRUE**: Shows which assets were selected
+            - 🔄 **ELSE condition executed**: Shows fallback asset selection
+            - ⚠️ **Insufficient data**: Shows when indicators can't be calculated
+            
+            **4. Test Single Day:**
+            - Pick a mismatched day from your comparison results
+            - Enable debug mode and run just that day
+            - Trace through the logic step by step
+            
+            **5. Verify Strategy JSON:**
+            - Check if your strategy has the expected structure
+            - Ensure conditional logic is properly nested
+            - Verify asset tickers match exactly
             """)
 
 def display_backtest_results(results, initial_capital, start_date, end_date):
