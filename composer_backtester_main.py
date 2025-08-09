@@ -924,6 +924,47 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
     st.subheader("🔧 Comparison Output Files")
     
     # Create comprehensive debug data
+    # Convert composer allocations to handle Timestamp keys properly
+    composer_allocations_dict = {}
+    for date, row in composer_data['allocations_df'].iterrows():
+        date_str = date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else str(date)
+        composer_allocations_dict[date_str] = row.to_dict()
+    
+    # Create a safe copy of composer_data with serializable dates
+    safe_composer_config = {}
+    for key, value in composer_data.items():
+        if key in ['start_date', 'end_date'] and hasattr(value, 'strftime'):
+            safe_composer_config[key] = value.strftime('%Y-%m-%d')
+        elif key == 'allocations_df':
+            # Skip this as we're handling it separately
+            continue
+        else:
+            safe_composer_config[key] = value
+    
+    # Debug: Check for any remaining non-serializable objects
+    def check_serializable(obj, path=""):
+        """Recursively check for non-serializable objects"""
+        if isinstance(obj, (str, int, float, bool, type(None))):
+            return None
+        elif isinstance(obj, (pd.Timestamp, pd.DatetimeTZDtype)):
+            return f"Timestamp at {path}"
+        elif hasattr(obj, 'strftime'):
+            return f"Datetime-like object at {path}"
+        elif isinstance(obj, (pd.Series, pd.DataFrame)):
+            return f"Pandas object at {path}"
+        elif isinstance(obj, dict):
+            for k, v in obj.items():
+                result = check_serializable(v, f"{path}.{k}")
+                if result:
+                    return result
+        elif isinstance(obj, (list, tuple)):
+            for i, item in enumerate(obj):
+                result = check_serializable(item, f"{path}[{i}]")
+                if result:
+                    return result
+        return None
+    
+    # Check for issues before creating debug_data
     debug_data = {
         'metadata': {
             'generated_at': datetime.now().isoformat(),
@@ -937,15 +978,80 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
             'avg_match_rate': comparison_results['Asset_Selection_Match'].mean(),
             'date_alignment': '✅ Aligned' if pd.Timestamp(start_date) >= pd.Timestamp(composer_data['start_date']) and pd.Timestamp(end_date) <= pd.Timestamp(composer_data['end_date']) else '⚠️ Extended beyond available data'
         },
-        'daily_comparison': comparison_results.to_dict('records'),
-        'inhouse_backtest': inhouse_results.to_dict('records'),
-        'composer_allocations': composer_data['allocations_df'].to_dict('index'),
+        'daily_comparison': comparison_results.copy().assign(
+            Date=lambda x: x['Date'].dt.strftime('%Y-%m-%d') if hasattr(x['Date'].iloc[0], 'strftime') else x['Date']
+        ).to_dict('records'),
+        'inhouse_backtest': inhouse_results.copy().assign(
+            Date=lambda x: x['Date'].dt.strftime('%Y-%m-%d') if hasattr(x['Date'].iloc[0], 'strftime') else x['Date']
+        ).to_dict('records'),
+        'composer_allocations': composer_allocations_dict,
         'strategy_config': strategy_data,
-        'composer_config': composer_data
+        'composer_config': safe_composer_config
     }
     
-    # Convert to JSON for download
-    debug_json = json.dumps(debug_data, indent=2, default=str)
+    # Check for serialization issues
+    serialization_issue = check_serializable(debug_data, "debug_data")
+    if serialization_issue:
+        st.warning(f"⚠️ Potential serialization issue detected: {serialization_issue}")
+        st.info("The system will attempt to handle this automatically, but you may see warnings.")
+    
+    # Convert to JSON for download with custom encoder to handle any remaining Timestamp objects
+    def json_serializer(obj):
+        if hasattr(obj, 'strftime'):
+            return obj.strftime('%Y-%m-%d')
+        elif hasattr(obj, 'isoformat'):
+            return obj.isoformat()
+        elif isinstance(obj, (pd.Timestamp, pd.DatetimeTZDtype)):
+            return obj.strftime('%Y-%m-%d')
+        elif isinstance(obj, (pd.Series, pd.DataFrame)):
+            return obj.to_dict()
+        elif isinstance(obj, dict):
+            # Recursively handle nested dictionaries
+            return {str(k): json_serializer(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            # Recursively handle lists and tuples
+            return [json_serializer(item) for item in obj]
+        else:
+            return str(obj)
+    
+    try:
+        debug_json = json.dumps(debug_data, indent=2, default=json_serializer)
+    except Exception as e:
+        st.error(f"Error serializing debug data to JSON: {str(e)}")
+        st.error("This usually indicates there are still non-serializable objects in the data.")
+        # Fallback: try with a more aggressive serializer
+        def aggressive_serializer(obj):
+            try:
+                if hasattr(obj, 'strftime'):
+                    return obj.strftime('%Y-%m-%d')
+                elif hasattr(obj, 'isoformat'):
+                    return obj.isoformat()
+                elif isinstance(obj, (pd.Timestamp, pd.DatetimeTZDtype)):
+                    return obj.strftime('%Y-%m-%d')
+                elif isinstance(obj, (pd.Series, pd.DataFrame)):
+                    return str(obj)
+                elif isinstance(obj, dict):
+                    return {str(k): aggressive_serializer(v) for k, v in obj.items()}
+                elif isinstance(obj, (list, tuple)):
+                    return [aggressive_serializer(item) for item in obj]
+                else:
+                    return str(obj)
+            except:
+                return str(obj)
+        
+        try:
+            debug_json = json.dumps(debug_data, indent=2, default=aggressive_serializer)
+        except Exception as e2:
+            st.error(f"Even aggressive serialization failed: {str(e2)}")
+            # Last resort: create a minimal debug file
+            minimal_debug = {
+                'metadata': {
+                    'generated_at': datetime.now().isoformat(),
+                    'error': f"Serialization failed: {str(e)}",
+                    'fallback_error': str(e2)
+                }
+            }
+            debug_json = json.dumps(minimal_debug, indent=2)
     
     # Create a more readable CSV version for daily comparison
     daily_csv = comparison_results.copy()
@@ -1001,7 +1107,9 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
             'Initial_Capital': initial_capital,
             'Date_Alignment_Status': '✅ Aligned' if pd.Timestamp(start_date) >= pd.Timestamp(composer_data['start_date']) and pd.Timestamp(end_date) <= pd.Timestamp(composer_data['end_date']) else '⚠️ Extended beyond available data'
         },
-        'Daily_Summary': comparison_results[['Date', 'Asset_Selection_Match', 'Rebalanced', 'InHouse_Num_Assets', 'Composer_Num_Assets']].to_dict('records'),
+        'Daily_Summary': comparison_results[['Date', 'Asset_Selection_Match', 'Rebalanced', 'InHouse_Num_Assets', 'Composer_Num_Assets']].copy().assign(
+            Date=lambda x: x['Date'].dt.strftime('%Y-%m-%d') if hasattr(x['Date'].iloc[0], 'strftime') else x['Date']
+        ).to_dict('records'),
         'Ticker_Summary': ticker_comparison_df.groupby('Ticker').agg({
             'Selection_Match': 'mean',
             'Weight_Difference': 'mean',
@@ -1043,7 +1151,16 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
         )
     
     with col4:
-        summary_json = json.dumps(summary_comparison, indent=2, default=str)
+        try:
+            summary_json = json.dumps(summary_comparison, indent=2, default=json_serializer)
+        except Exception as e:
+            st.error(f"Error serializing summary data to JSON: {str(e)}")
+            # Fallback: create a minimal summary
+            minimal_summary = {
+                'error': f"Serialization failed: {str(e)}",
+                'generated_at': datetime.now().isoformat()
+            }
+            summary_json = json.dumps(minimal_summary, indent=2)
         st.download_button(
             label="📥 Download Summary JSON",
             data=summary_json,
