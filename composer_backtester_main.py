@@ -86,29 +86,46 @@ class ComposerBacktester:
             return np.nan
             
         df = self.data[symbol]
-        if date not in df.index:
-            # Find the closest previous date
-            available_dates = df.index[df.index <= date]
-            if len(available_dates) == 0:
-                return np.nan
-            date = available_dates[-1]
+        if df.empty:
+            return np.nan
+            
+        # Find the closest previous date
+        available_dates = df.index[df.index <= date]
+        if len(available_dates) == 0:
+            return np.nan
+        actual_date = available_dates[-1]
         
         prices = df['Close']
         
-        if indicator == 'relative-strength-index':
-            values = self.calculate_rsi(prices, window)
-        elif indicator == 'moving-average-price':
-            values = self.calculate_sma(prices, window)
-        elif indicator == 'current-price':
-            return prices.loc[date]
-        elif indicator == 'cumulative-return':
-            values = self.calculate_cumulative_return(prices, window)
-        elif indicator == 'max-drawdown':
-            values = self.calculate_max_drawdown(prices, window)
-        else:
-            return np.nan
+        try:
+            if indicator == 'relative-strength-index':
+                values = self.calculate_rsi(prices, window)
+            elif indicator == 'moving-average-price':
+                values = self.calculate_sma(prices, window)
+            elif indicator == 'current-price':
+                return float(prices.loc[actual_date])
+            elif indicator == 'cumulative-return':
+                values = self.calculate_cumulative_return(prices, window)
+            elif indicator == 'max-drawdown':
+                values = self.calculate_max_drawdown(prices, window)
+            else:
+                return np.nan
             
-        return values.loc[date] if date in values.index else np.nan
+            # Get the scalar value at the specific date
+            if actual_date in values.index:
+                result = values.loc[actual_date]
+                # Convert to scalar if it's a Series with one element
+                if hasattr(result, 'item'):
+                    return float(result.item())
+                else:
+                    return float(result)
+            else:
+                return np.nan
+                
+        except Exception as e:
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"Error calculating {indicator} for {symbol}: {e}")
+            return np.nan
     
     def evaluate_condition(self, condition: Dict[str, Any], date: pd.Timestamp) -> bool:
         """Evaluate a condition node"""
@@ -146,26 +163,39 @@ class ComposerBacktester:
         else:
             rhs_value = self.get_indicator_value(rhs_val, rhs_fn, rhs_window, date)
         
+        # Ensure we have scalar values
+        if pd.isna(lhs_value) or pd.isna(rhs_value):
+            return False
+        
+        # Convert to float to ensure scalar comparison
+        try:
+            lhs_value = float(lhs_value)
+            rhs_value = float(rhs_value)
+        except (ValueError, TypeError):
+            return False
+        
         # Debug output
         if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
             st.write(f"Debug: {date.date()} - {lhs_fn}({lhs_val}, {lhs_window}) = {lhs_value:.2f} {comparator} {rhs_value:.2f}")
         
         # Compare values
-        if pd.isna(lhs_value) or pd.isna(rhs_value):
-            return False
-            
         if comparator == 'gt':
-            return lhs_value > rhs_value
+            result = lhs_value > rhs_value
         elif comparator == 'lt':
-            return lhs_value < rhs_value
+            result = lhs_value < rhs_value
         elif comparator == 'gte':
-            return lhs_value >= rhs_value
+            result = lhs_value >= rhs_value
         elif comparator == 'lte':
-            return lhs_value <= rhs_value
+            result = lhs_value <= rhs_value
         elif comparator == 'eq':
-            return abs(lhs_value - rhs_value) < 0.0001
+            result = abs(lhs_value - rhs_value) < 0.0001
+        else:
+            result = False
         
-        return False
+        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+            st.write(f"  → Result: {result}")
+        
+        return bool(result)
     
     def apply_filter(self, assets: List[Dict[str, Any]], filter_config: Dict[str, Any], date: pd.Timestamp) -> List[str]:
         """Apply filter to select assets"""
@@ -185,7 +215,10 @@ class ComposerBacktester:
             ticker = asset['ticker']
             value = self.get_indicator_value(ticker, sort_fn, sort_window, date)
             if not pd.isna(value):
-                asset_values.append((ticker, value))
+                asset_values.append((ticker, float(value)))
+        
+        if not asset_values:
+            return []
         
         # Sort assets
         if select_fn == 'top':
@@ -195,6 +228,10 @@ class ComposerBacktester:
         
         # Select top N
         selected = [ticker for ticker, _ in asset_values[:select_n]]
+        
+        if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+            st.write(f"Filter: {sort_fn} - {asset_values} → {selected}")
+        
         return selected
     
     def evaluate_node(self, node: Dict[str, Any], date: pd.Timestamp) -> List[str]:
