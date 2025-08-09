@@ -782,8 +782,10 @@ def compare_allocations(inhouse_results: pd.DataFrame, composer_allocations: pd.
                 diff = abs(inhouse_weight - composer_weight)
                 allocation_diffs[asset] = diff
             
+            # Create detailed daily comparison record
             comparison_data.append({
                 'Date': date,
+                'Date_Str': date.strftime('%Y-%m-%d'),
                 'InHouse_Assets': inhouse_assets,
                 'Composer_Assets': ', '.join(composer_assets),
                 'Common_Assets': ', '.join(common_assets),
@@ -792,7 +794,18 @@ def compare_allocations(inhouse_results: pd.DataFrame, composer_allocations: pd.
                 'Asset_Selection_Match': len(common_assets) / max(len(inhouse_set), len(composer_set)) if max(len(inhouse_set), len(composer_set)) > 0 else 1.0,
                 'Allocation_Differences': allocation_diffs,
                 'InHouse_Portfolio_Value': row['Portfolio_Value'],
-                'Rebalanced': row['Rebalanced']
+                'Rebalanced': row['Rebalanced'],
+                'InHouse_Num_Assets': len(inhouse_set),
+                'Composer_Num_Assets': len(composer_set),
+                'Match_Score': len(common_assets) / max(len(inhouse_set), len(composer_set)) if max(len(inhouse_set), len(composer_set)) > 0 else 1.0,
+                'InHouse_Holdings_JSON': json.dumps(inhouse_holdings),
+                'Composer_Holdings_JSON': json.dumps(composer_holdings),
+                'Debug_Info': {
+                    'inhouse_holdings': inhouse_holdings,
+                    'composer_holdings': composer_holdings,
+                    'inhouse_set': list(inhouse_set),
+                    'composer_set': list(composer_assets)
+                }
             })
     
     return pd.DataFrame(comparison_data)
@@ -903,9 +916,316 @@ def display_comparison_results(comparison_results: pd.DataFrame, inhouse_results
             mime="text/csv"
         )
 
+def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.DataFrame, 
+                       composer_allocations: pd.DataFrame, strategy_data: dict, 
+                       composer_data: dict, start_date, end_date, initial_capital: float):
+    """Generate a comprehensive debug file for analysis"""
+    
+    st.subheader("🔧 Comparison Output Files")
+    
+    # Create comprehensive debug data
+    debug_data = {
+        'metadata': {
+            'generated_at': datetime.now().isoformat(),
+            'start_date': start_date.strftime('%Y-%m-%d'),
+            'backtest_period': f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}",
+            'initial_capital': initial_capital,
+            'strategy_name': strategy_data.get('description', 'Unknown'),
+            'composer_symphony': composer_data['symphony_name'],
+            'total_days': len(comparison_results),
+            'perfect_matches': (comparison_results['Asset_Selection_Match'] == 1.0).sum(),
+            'avg_match_rate': comparison_results['Asset_Selection_Match'].mean(),
+            'date_alignment': '✅ Aligned' if start_date >= pd.Timestamp(composer_data['start_date']) and end_date <= pd.Timestamp(composer_data['end_date']) else '⚠️ Extended beyond available data'
+        },
+        'daily_comparison': comparison_results.to_dict('records'),
+        'inhouse_backtest': inhouse_results.to_dict('records'),
+        'composer_allocations': composer_data['allocations_df'].to_dict('orient', 'index'),
+        'strategy_config': strategy_data,
+        'composer_config': composer_data
+    }
+    
+    # Convert to JSON for download
+    debug_json = json.dumps(debug_data, indent=2, default=str)
+    
+    # Create a more readable CSV version for daily comparison
+    daily_csv = comparison_results.copy()
+    daily_csv['Date'] = daily_csv['Date'].dt.strftime('%Y-%m-%d')
+    daily_csv['Allocation_Differences'] = daily_csv['Allocation_Differences'].apply(lambda x: str(x))
+    
+    # Create a comprehensive daily ticker comparison file
+    daily_ticker_comparison = []
+    for _, row in comparison_results.iterrows():
+        date_str = row['Date'].strftime('%Y-%m-%d')
+        
+        # Get all unique tickers from both sources
+        inhouse_tickers = set(row['InHouse_Assets'].split(', ')) if row['InHouse_Assets'] != 'None' else set()
+        composer_tickers = set(row['Composer_Assets'].split(', ')) if row['Composer_Assets'] else set()
+        all_tickers = inhouse_tickers | composer_tickers
+        
+        # Create a row for each ticker
+        for ticker in sorted(all_tickers):
+            inhouse_weight = row['Holdings'].get(ticker, 0) if row['InHouse_Assets'] != 'None' else 0
+            composer_weight = 0
+            if ticker in composer_data['tickers']:
+                composer_row = composer_data['allocations_df'].loc[row['Date']] if row['Date'] in composer_data['allocations_df'].index else None
+                if composer_row is not None and ticker in composer_row:
+                    composer_weight = composer_row[ticker] / 100  # Convert % to decimal
+            
+            daily_ticker_comparison.append({
+                'Date': date_str,
+                'Ticker': ticker,
+                'InHouse_Weight': inhouse_weight,
+                'Composer_Weight': composer_weight,
+                'Weight_Difference': abs(inhouse_weight - composer_weight),
+                'InHouse_Selected': ticker in inhouse_tickers,
+                'Composer_Selected': ticker in composer_tickers,
+                'Selection_Match': ticker in inhouse_tickers and ticker in composer_tickers,
+                'Rebalanced': row['Rebalanced'],
+                'Match_Quality': 'Perfect' if ticker in inhouse_tickers and ticker in composer_tickers else 'Missing_In_InHouse' if ticker in composer_tickers else 'Extra_In_InHouse'
+            })
+    
+    ticker_comparison_df = pd.DataFrame(daily_ticker_comparison)
+    
+    # Create a summary comparison file
+    summary_comparison = {
+        'Comparison_Summary': {
+            'Total_Days_Analyzed': len(comparison_results),
+            'Date_Range': f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}",
+            'Perfect_Match_Days': (comparison_results['Asset_Selection_Match'] == 1.0).sum(),
+            'Average_Match_Rate': f"{comparison_results['Asset_Selection_Match'].mean() * 100:.2f}%",
+            'Total_Ticker_Selections': len(ticker_comparison_df),
+            'Perfect_Ticker_Matches': ticker_comparison_df['Selection_Match'].sum(),
+            'Ticker_Match_Rate': f"{(ticker_comparison_df['Selection_Match'].sum() / len(ticker_comparison_df)) * 100:.2f}%",
+            'Strategy_Name': strategy_data.get('description', 'Unknown'),
+            'Composer_Symphony': composer_data['symphony_name'],
+            'Initial_Capital': initial_capital,
+            'Date_Alignment_Status': '✅ Aligned' if start_date >= pd.Timestamp(composer_data['start_date']) and end_date <= pd.Timestamp(composer_data['end_date']) else '⚠️ Extended beyond available data'
+        },
+        'Daily_Summary': comparison_results[['Date', 'Asset_Selection_Match', 'Rebalanced', 'InHouse_Num_Assets', 'Composer_Num_Assets']].to_dict('records'),
+        'Ticker_Summary': ticker_comparison_df.groupby('Ticker').agg({
+            'Selection_Match': 'mean',
+            'Weight_Difference': 'mean',
+            'InHouse_Selected': 'sum',
+            'Composer_Selected': 'sum'
+        }).reset_index().to_dict('records')
+    }
+    
+    # Download options - ENHANCED with summary file
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.download_button(
+            label="📥 Download Debug JSON",
+            data=debug_json,
+            file_name=f"debug_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            help="Complete debug data in JSON format for detailed analysis"
+        )
+    
+    with col2:
+        csv_data = daily_csv.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Daily Comparison CSV",
+            data=csv_data,
+            file_name=f"daily_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            help="Daily allocation comparison in CSV format for spreadsheet analysis"
+        )
+    
+    with col3:
+        ticker_csv = ticker_comparison_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Ticker Comparison CSV",
+            data=ticker_csv,
+            file_name=f"daily_ticker_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            help="Daily ticker-by-ticker comparison for detailed analysis"
+        )
+    
+    with col4:
+        summary_json = json.dumps(summary_comparison, indent=2, default=str)
+        st.download_button(
+            label="📥 Download Summary JSON",
+            data=summary_json,
+            file_name=f"comparison_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            help="High-level comparison summary in JSON format"
+        )
+    
+    # Display debug summary
+    st.success("✅ Comparison output files generated successfully!")
+    st.info("📋 **Debug JSON**: Complete data for AI analysis and debugging")
+    st.info("📊 **Daily CSV**: Spreadsheet-friendly format for manual review")
+    st.info("🎯 **Ticker Comparison CSV**: Daily ticker-by-ticker selection comparison")
+    st.info("📈 **Summary JSON**: High-level comparison metrics and insights")
+    
+    # Instructions for using debug file
+    with st.expander("📖 How to Use Comparison Files"):
+        st.markdown("""
+        **🔧 For AI Debugging (Recommended):**
+        1. Download the **Debug JSON** file
+        2. Share it with me (the AI) by uploading it
+        3. I can analyze the complete data and help fix logic issues
+        
+        **📊 For Manual Review:**
+        1. **Daily Comparison CSV**: Overview of daily asset selection differences
+        2. **Ticker Comparison CSV**: Detailed ticker-by-ticker analysis
+        3. **Summary JSON**: High-level metrics and insights
+        
+        **🚨 Key Analysis Columns:**
+        - **Asset_Selection_Match**: Percentage of assets that match (1.0 = perfect)
+        - **Missing_In_InHouse**: Assets Composer selected but in-house missed
+        - **Extra_In_InHouse**: Assets in-house selected but Composer didn't
+        - **Weight_Difference**: Allocation weight differences for each ticker
+        - **Match_Quality**: Perfect, Missing_In_InHouse, or Extra_In_InHouse
+        
+        **💡 Analysis Strategy:**
+        1. Focus on days with low Match_Score first
+        2. Use Ticker Comparison CSV to see which specific tickers are mismatched
+        3. Check if missing assets meet your strategy conditions
+        4. Verify filter logic and conditional evaluations
+        5. Look for patterns in mismatched days
+        """)
+    
+    # Show key debugging insights
+    st.subheader("🔍 Key Comparison Insights")
+    
+    # Find days with biggest mismatches
+    mismatches = comparison_results[comparison_results['Asset_Selection_Match'] < 1.0]
+    if len(mismatches) > 0:
+        worst_matches = mismatches.nsmallest(3, 'Asset_Selection_Match')
+        
+        st.warning("🚨 **Top 3 Days with Biggest Mismatches:**")
+        for _, row in worst_matches.iterrows():
+            st.write(f"**{row['Date'].date()}** - Match Rate: {row['Asset_Selection_Match']*100:.1f}%")
+            st.write(f"  - In-House: {row['InHouse_Assets']}")
+            st.write(f"  - Composer: {row['Composer_Assets']}")
+            st.write(f"  - Missing: {row['Missing_In_InHouse']}")
+            st.write(f"  - Extra: {row['Extra_In_InHouse']}")
+            st.write("---")
+    else:
+        st.success("🎉 Perfect match on all days! In-house logic is working correctly.")
+    
+    # Show strategy complexity metrics
+    strategy_complexity = {
+        'total_nodes': count_strategy_nodes(strategy_data),
+        'conditional_nodes': count_conditional_nodes(strategy_data),
+        'filter_nodes': count_filter_nodes(strategy_data)
+    }
+    
+    st.info("📊 **Strategy Complexity Analysis:**")
+    st.write(f"- Total nodes: {strategy_complexity['total_nodes']}")
+    st.write(f"- Conditional nodes: {strategy_complexity['conditional_nodes']}")
+    st.write(f"- Filter nodes: {strategy_complexity['filter_nodes']}")
+    
+    # Show ticker comparison summary
+    st.subheader("🎯 Ticker Selection Summary")
+    
+    if not ticker_comparison_df.empty:
+        total_selections = len(ticker_comparison_df)
+        perfect_matches = ticker_comparison_df['Selection_Match'].sum()
+        match_rate = (perfect_matches / total_selections) * 100 if total_selections > 0 else 0
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Ticker Selections", total_selections)
+        with col2:
+            st.metric("Perfect Matches", perfect_matches)
+        with col3:
+            st.metric("Match Rate", f"{match_rate:.1f}%")
+        
+        # Show most problematic tickers
+        ticker_issues = ticker_comparison_df.groupby('Ticker').agg({
+            'Selection_Match': 'mean',
+            'Weight_Difference': 'mean'
+        }).reset_index()
+        
+        problematic_tickers = ticker_issues[ticker_issues['Selection_Match'] < 1.0].sort_values('Selection_Match')
+        
+        if not problematic_tickers.empty:
+            st.warning("🚨 **Tickers with Selection Issues:**")
+            st.dataframe(problematic_tickers, use_container_width=True)
+
+def count_strategy_nodes(strategy: dict) -> int:
+    """Count total nodes in strategy tree"""
+    def count_recursive(node):
+        count = 1
+        if 'children' in node:
+            for child in node['children']:
+                count += count_recursive(child)
+        return count
+    
+    return count_recursive(strategy)
+
+def count_conditional_nodes(strategy: dict) -> int:
+    """Count conditional nodes in strategy tree"""
+    def count_recursive(node):
+        count = 1 if node.get('type') == 'conditional' else 0
+        if 'children' in node:
+            for child in node['children']:
+                count += count_recursive(child)
+        return count
+    
+    return count_recursive(strategy)
+
+def count_filter_nodes(strategy: dict) -> int:
+    """Count filter nodes in strategy tree"""
+    def count_recursive(node):
+        count = 1 if node.get('type') == 'filter' else 0
+        if 'children' in node:
+            for child in node['children']:
+                count += count_recursive(child)
+        return count
+    
+    return count_recursive(strategy)
+
 def main():
     st.title("📈 Composer Strategy Backtester")
-    st.markdown("Upload your Composer strategy JSON files or fetch directly from Composer URL.")
+    st.markdown("Compare your in-house strategy logic with Composer's actual allocations")
+    
+    # NEW: Prominent unified workflow section
+    st.markdown("---")
+    st.markdown("## 🚀 **Single Button Workflow - Run Both Backtests & Compare!**")
+    
+    st.info("""
+    **🎯 What You Get:**
+    - **One Button**: Automatically runs both in-house and Composer backtests
+    - **Date Alignment**: Ensures both backtests use the same date range
+    - **Daily Ticker Comparison**: Detailed analysis of ticker selection differences
+    - **4 Output Files**: Comprehensive comparison data for analysis
+    
+    **📋 How to Use:**
+    1. Upload your Composer strategy JSON file
+    2. Enter your Composer symphony URL  
+    3. Set your desired backtest dates
+    4. Click **"🚀 Run Both Backtests & Comparison"**
+    5. Get instant comparison results and downloadable files
+    """)
+    
+    st.markdown("---")
+    
+    # Add summary section
+    with st.expander("📋 **Quick Start Guide**", expanded=True):
+        st.markdown("""
+        **🎯 What This Tool Does:**
+        - Upload your Composer strategy JSON file
+        - Enter your Composer symphony URL
+        - Automatically fetch historical allocations from Composer
+        - Run in-house backtest using your strategy logic
+        - Compare daily ticker selections between both approaches
+        - Generate comprehensive comparison reports
+        
+        **🚀 Single Button Workflow:**
+        1. **Upload JSON** + **Enter URL** + **Set Dates** + **Click "🚀 Run Both Backtests & Comparison"**
+        2. Get detailed daily ticker selection comparison
+        3. Download comparison files for analysis
+        
+        **📊 Output Files:**
+        - **Daily Comparison CSV**: Daily asset selection overview
+        - **Ticker Comparison CSV**: Ticker-by-ticker daily analysis  
+        - **Debug JSON**: Complete data for AI analysis
+        - **Summary JSON**: High-level comparison metrics and insights
+        """)
     
     # Sidebar for inputs
     with st.sidebar:
@@ -913,7 +1233,6 @@ def main():
         
         # Data source selection - allow both
         st.subheader("Data Sources")
-        st.info("You can use both sources to compare results!")
         
         # JSON upload
         st.write("**1. Upload JSON File**")
@@ -927,54 +1246,78 @@ def main():
                 st.error("Invalid JSON file. Please upload a valid Composer strategy file.")
         
         # Composer URL fetch
-        st.write("**2. Fetch from Composer URL**")
+        st.write("**2. Enter Composer URL**")
         composer_url = st.text_input(
             "Composer Symphony URL",
             placeholder="https://app.composer.trade/symphony/...",
             help="Enter the full URL of your Composer symphony"
         )
         
-        if composer_url:
-            # Date range for fetching
-            col1, col2 = st.columns(2)
-            with col1:
-                fetch_start_date = st.date_input("Fetch Start Date", datetime.now() - timedelta(days=365*3))
-            with col2:
-                fetch_end_date = st.date_input("Fetch End Date", datetime.now())
-            
-            if st.button("🔄 Fetch Strategy Data"):
+        # Show status and options
+        if strategy_data and composer_url:
+            st.success("🎯 **Ready for Unified Comparison!**")
+            st.info("You have both JSON and URL. Use the 'Auto-Fetch & Run Comparison' button below!")
+        elif strategy_data:
+            st.info("📄 JSON loaded. Add a Composer URL to enable comparison mode.")
+        elif composer_url:
+            st.info("🌐 URL entered. Upload a JSON file to enable comparison mode.")
+        else:
+            st.info("👆 Upload a JSON file and/or enter a Composer URL to get started!")
+        
+        # Manual fetch option (for when you want to preview data first)
+        if composer_url and not hasattr(st.session_state, 'composer_data'):
+            st.write("**3. Preview Composer Data (Optional)**")
+            if st.button("👀 Preview Composer Data"):
                 try:
-                    with st.spinner("Fetching data from Composer..."):
-                        # Convert dates to string format
-                        start_str = fetch_start_date.strftime('%Y-%m-%d')
-                        end_str = fetch_end_date.strftime('%Y-%m-%d')
+                    with st.spinner("Fetching preview data..."):
+                        # Use a shorter date range for preview
+                        preview_start = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+                        preview_end = datetime.now().strftime('%Y-%m-%d')
                         
-                        # Fetch the backtest data
-                        allocations_df, symphony_name, tickers = fetch_composer_backtest(composer_url, start_str, end_str)
+                        allocations_df, symphony_name, tickers = fetch_composer_backtest(composer_url, preview_start, preview_end)
                         
-                        # Store in session state for later use
                         st.session_state.composer_data = {
                             'allocations_df': allocations_df,
                             'symphony_name': symphony_name,
                             'tickers': tickers,
-                            'start_date': start_str,
-                            'end_date': end_str
+                            'start_date': preview_start,
+                            'end_date': preview_end
                         }
                         
-                        st.success(f"✅ Successfully fetched data for: {symphony_name}")
-                        st.info(f"Date range: {start_str} to {end_str}")
+                        st.success(f"✅ Preview data fetched for: {symphony_name}")
+                        st.info(f"Preview period: {preview_start} to {preview_end}")
                         st.info(f"Assets: {', '.join(tickers)}")
                 
                 except Exception as e:
-                    st.error(f"Error fetching data: {str(e)}")
+                    st.error(f"Error fetching preview data: {str(e)}")
         
-        # Date range for backtesting (for both sources)
+        # Date range for backtesting
         st.subheader("Backtest Settings")
+        
+        # Date range selection
         col1, col2 = st.columns(2)
         with col1:
             start_date = st.date_input("Start Date", datetime.now() - timedelta(days=365))
         with col2:
             end_date = st.date_input("End Date", datetime.now())
+        
+        # Show date alignment info when both sources are available
+        if hasattr(st.session_state, 'composer_data') and strategy_data is not None:
+            composer_data = st.session_state.composer_data
+            composer_start = pd.Timestamp(composer_data['start_date'])
+            composer_end = pd.Timestamp(composer_data['end_date'])
+            
+            # Check if selected dates are within Composer data range
+            selected_start = pd.Timestamp(start_date)
+            selected_end = pd.Timestamp(end_date)
+            
+            if selected_start < composer_start or selected_end > composer_end:
+                st.warning("⚠️ **Date Range Warning:** Selected dates extend beyond available Composer data")
+                st.info(f"Composer data available: {composer_start.date()} to {composer_end.date()}")
+                st.info("Consider adjusting dates or the tool will use available data within your selection")
+            else:
+                st.success("✅ **Date Range Aligned:** Selected dates are within Composer data range")
+                st.info(f"Composer data covers: {composer_start.date()} to {composer_end.date()}")
         
         # Initial capital
         initial_capital = st.number_input("Initial Capital ($)", value=100000, min_value=1000)
@@ -1030,42 +1373,161 @@ def main():
         with st.expander("View Composer Asset Allocations"):
             st.dataframe(composer_data['allocations_df'])
     
-    # Run backtests and comparison
-    if has_json and has_composer:
-        st.subheader("🔄 Run Both Backtests & Compare")
+    # Run backtests and comparison - now handled by the unified button below
+    
+    # Enhanced unified comparison button for when we have JSON + URL
+    elif has_json and composer_url and not has_composer:
+        st.subheader("🔄 Run Unified Comparison Analysis")
+        st.info("📋 You have a JSON strategy and Composer URL. Click below to automatically fetch data and run comparison!")
         
-        if st.button("🚀 Run Comparison Analysis", type="primary"):
+        if st.button("🚀 Auto-Fetch & Run Comparison", type="primary", use_container_width=True):
             if not HAS_YFINANCE:
                 st.error("Cannot run backtest without yfinance. Please install required dependencies.")
                 st.code("pip install yfinance plotly")
                 return
             
-            # Run in-house backtest
-            st.info("Running in-house backtest from JSON...")
-            backtester = ComposerBacktester()
-            backtester.cash = initial_capital
+            try:
+                with st.spinner("🔄 Automatically fetching Composer data and running comparison..."):
+                    # Progress tracking
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    # Step 1: Auto-fetch Composer data
+                    status_text.text("Step 1/4: Fetching data from Composer...")
+                    progress_bar.progress(0.25)
+                    
+                    # Use the date inputs from sidebar for fetching
+                    fetch_start_str = start_date.strftime('%Y-%m-%d')
+                    fetch_end_str = end_date.strftime('%Y-%m-%d')
+                    
+                    allocations_df, symphony_name, tickers = fetch_composer_backtest(
+                        composer_url, fetch_start_str, fetch_end_str
+                    )
+                    
+                    # Store in session state
+                    st.session_state.composer_data = {
+                        'allocations_df': allocations_df,
+                        'symphony_name': symphony_name,
+                        'tickers': tickers,
+                        'start_date': fetch_start_str,
+                        'end_date': fetch_end_str
+                    }
+                    
+                    # Step 2: Run in-house backtest
+                    status_text.text("Step 2/4: Running in-house backtest...")
+                    progress_bar.progress(0.5)
+                    
+                    backtester = ComposerBacktester()
+                    backtester.cash = initial_capital
+                    
+                    inhouse_results = backtester.run_backtest(
+                        strategy_data, 
+                        start_date.strftime('%Y-%m-%d'),
+                        end_date.strftime('%Y-%m-%d')
+                    )
+                    
+                    # Step 3: Prepare Composer data
+                    status_text.text("Step 3/4: Preparing comparison data...")
+                    progress_bar.progress(0.75)
+                    
+                    composer_allocations = allocations_df
+                    
+                    # Step 4: Run comparison analysis
+                    status_text.text("Step 4/4: Running comparison analysis...")
+                    progress_bar.progress(1.0)
+                    
+                    comparison_results = compare_allocations(
+                        inhouse_results, 
+                        composer_allocations, 
+                        tickers,
+                        start_date,
+                        end_date
+                    )
+                    
+                    # Clear progress indicators
+                    progress_bar.empty()
+                    status_text.empty()
+                    
+                    # Display comparison results
+                    display_comparison_results(comparison_results, inhouse_results, composer_allocations, initial_capital)
+                    
+                    # Generate comprehensive debug file
+                    generate_debug_file(comparison_results, inhouse_results, composer_allocations, 
+                                      strategy_data, st.session_state.composer_data, start_date, end_date, initial_capital)
+                    
+                    st.success("🎉 Unified comparison completed successfully!")
+                    
+            except Exception as e:
+                st.error(f"Error during unified comparison: {str(e)}")
+                import traceback
+                st.error(f"Detailed error: {traceback.format_exc()}")
+    
+    # NEW: Single button to run both backtests and comparison when both data sources are available
+    elif has_json and has_composer:
+        st.subheader("🔄 Run Both Backtests & Comparison")
+        st.info("📋 You have both JSON strategy and Composer data. Click below to run both backtests and generate comparison!")
+        
+        if st.button("🚀 Run Both Backtests & Comparison", type="primary", use_container_width=True):
+            if not HAS_YFINANCE:
+                st.error("Cannot run backtest without yfinance. Please install required dependencies.")
+                st.code("pip install yfinance plotly")
+                return
             
-            inhouse_results = backtester.run_backtest(
-                strategy_data, 
-                start_date.strftime('%Y-%m-%d'),
-                end_date.strftime('%Y-%m-%d')
-            )
-            
-            # Get Composer data for comparison
-            composer_data = st.session_state.composer_data
-            composer_allocations = composer_data['allocations_df']
-            
-            # Run comparison analysis
-            comparison_results = compare_allocations(
-                inhouse_results, 
-                composer_allocations, 
-                composer_data['tickers'],
-                start_date,
-                end_date
-            )
-            
-            # Display comparison results
-            display_comparison_results(comparison_results, inhouse_results, composer_allocations, initial_capital)
+            try:
+                with st.spinner("🔄 Running both backtests and generating comparison..."):
+                    # Progress tracking
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    # Step 1: Run in-house backtest
+                    status_text.text("Step 1/3: Running in-house backtest from JSON...")
+                    progress_bar.progress(0.33)
+                    
+                    backtester = ComposerBacktester()
+                    backtester.cash = initial_capital
+                    
+                    inhouse_results = backtester.run_backtest(
+                        strategy_data, 
+                        start_date.strftime('%Y-%m-%d'),
+                        end_date.strftime('%Y-%m-%d')
+                    )
+                    
+                    # Step 2: Prepare Composer data
+                    status_text.text("Step 2/3: Preparing Composer data for comparison...")
+                    progress_bar.progress(0.66)
+                    
+                    composer_data = st.session_state.composer_data
+                    composer_allocations = composer_data['allocations_df']
+                    
+                    # Step 3: Run comparison analysis
+                    status_text.text("Step 3/3: Running comparison analysis...")
+                    progress_bar.progress(1.0)
+                    
+                    comparison_results = compare_allocations(
+                        inhouse_results, 
+                        composer_allocations, 
+                        composer_data['tickers'],
+                        start_date,
+                        end_date
+                    )
+                    
+                    # Clear progress indicators
+                    progress_bar.empty()
+                    status_text.empty()
+                    
+                    # Display comparison results
+                    display_comparison_results(comparison_results, inhouse_results, composer_allocations, initial_capital)
+                    
+                    # Generate comprehensive debug file
+                    generate_debug_file(comparison_results, inhouse_results, composer_allocations, 
+                                      strategy_data, composer_data, start_date, end_date, initial_capital)
+                    
+                    st.success("🎉 Both backtests and comparison completed successfully!")
+                    
+            except Exception as e:
+                st.error(f"Error during backtest and comparison: {str(e)}")
+                import traceback
+                st.error(f"Detailed error: {traceback.format_exc()}")
     
     elif has_json:
         st.subheader("🚀 Run In-House Backtest")
@@ -1316,11 +1778,11 @@ def main():
             **🔄 Comparison Mode (Recommended)**
             1. **Upload JSON**: Select your Composer strategy JSON file
             2. **Enter Composer URL**: Paste your Composer symphony URL
-            3. **Fetch Data**: Download historical allocations from Composer
-            4. **Set Parameters**: Choose backtest dates and initial capital
-            5. **Run Comparison**: Execute both backtests and compare results
+            3. **Set Parameters**: Choose backtest dates and initial capital
+            4. **Click Single Button**: "🚀 Run Both Backtests & Comparison"
+            5. **Get Results**: Automatic execution of both backtests and comparison
             6. **Analyze Differences**: Verify in-house logic matches Composer
-            7. **Download Results**: Export comparison data for analysis
+            7. **Download Results**: Export 4 comprehensive comparison files
             
             **📄 JSON-Only Mode**
             1. **Upload JSON**: Select your Composer strategy JSON file
@@ -1336,11 +1798,12 @@ def main():
             4. **Analyze**: View allocation patterns and basic statistics
             
             **🔍 Comparison Features:**
-            - ✅ Daily allocation matching verification
-            - ✅ Asset selection accuracy analysis
-            - ✅ Performance comparison metrics
-            - ✅ Mismatch identification and analysis
-            - ✅ Downloadable comparison reports
+            - ✅ **Single Button Execution**: Run both backtests simultaneously
+            - ✅ **Date Alignment**: Ensures both backtests use identical date ranges
+            - ✅ **Daily Ticker Comparison**: Detailed analysis of ticker selection differences
+            - ✅ **Asset Selection Accuracy**: Verify in-house logic matches Composer
+            - ✅ **4 Output Files**: Comprehensive comparison data for analysis
+            - ✅ **Mismatch Identification**: Pinpoint days and tickers with differences
             
             **📊 Supported Indicators:**
             - ✅ RSI indicators and comparisons
@@ -1452,3 +1915,4 @@ def display_backtest_results(results, initial_capital, start_date, end_date):
 
 if __name__ == "__main__":
     main()
+
