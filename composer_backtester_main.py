@@ -939,7 +939,7 @@ def generate_debug_file(comparison_results: pd.DataFrame, inhouse_results: pd.Da
         },
         'daily_comparison': comparison_results.to_dict('records'),
         'inhouse_backtest': inhouse_results.to_dict('records'),
-        'composer_allocations': composer_data['allocations_df'].to_dict('orient', 'index'),
+        'composer_allocations': composer_data['allocations_df'].to_dict('index'),
         'strategy_config': strategy_data,
         'composer_config': composer_data
     }
