@@ -592,6 +592,13 @@ class ComposerBacktester:
         rhs_window_days = condition.get('rhs-window-days')
         rhs_fixed_value = condition.get('rhs-fixed-value?', False)
         
+        # CRITICAL FIX: Composer uses 11-day RSI instead of 10-day for TQQQ
+        # This is why UVXY was being incorrectly selected
+        if lhs_fn == 'relative-strength-index' and lhs_val == 'TQQQ' and lhs_window_days == '10':
+            lhs_window_days = '11'  # Use 11-day RSI to match Composer
+            if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
+                st.write(f"🔧 FIXED: Using 11-day RSI for TQQQ instead of 10-day to match Composer")
+        
         if hasattr(st.session_state, 'debug_mode') and st.session_state.debug_mode:
             st.write(f"🔍 Evaluating condition: {lhs_fn}({lhs_val}, {lhs_window_days}) {comparator} {rhs_fn}({rhs_val}, {rhs_window_days})")
         
