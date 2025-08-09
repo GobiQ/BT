@@ -1179,6 +1179,172 @@ def count_filter_nodes(strategy: dict) -> int:
     
     return count_recursive(strategy)
 
+def diagnose_mismatch(strategy_data: dict, composer_data: dict, comparison_results: pd.DataFrame, 
+                      inhouse_results: pd.DataFrame, composer_allocations: pd.DataFrame, 
+                      start_date, end_date) -> dict:
+    """
+    Comprehensive diagnostic function to identify causes of mismatch between in-house and Composer backtests
+    """
+    diagnosis = {
+        'summary': {},
+        'data_quality_issues': [],
+        'strategy_interpretation_issues': [],
+        'timing_issues': [],
+        'indicator_calculation_issues': [],
+        'filter_logic_issues': [],
+        'recommendations': []
+    }
+    
+    # 1. Data Quality Analysis
+    st.subheader("🔍 Data Quality Analysis")
+    
+    # Check if all required symbols have data
+    required_symbols = set()
+    if 'strategy_data' in locals():
+        required_symbols = set(extract_all_symbols(strategy_data))
+    
+    composer_symbols = set(composer_data.get('tickers', []))
+    missing_symbols = required_symbols - composer_symbols
+    extra_symbols = composer_symbols - required_symbols
+    
+    if missing_symbols:
+        diagnosis['data_quality_issues'].append(f"Missing symbols in Composer data: {missing_symbols}")
+        st.warning(f"⚠️ Missing symbols in Composer data: {missing_symbols}")
+    
+    if extra_symbols:
+        diagnosis['data_quality_issues'].append(f"Extra symbols in Composer data: {extra_symbols}")
+        st.info(f"ℹ️ Extra symbols in Composer data: {extra_symbols}")
+    
+    # Check date alignment
+    composer_start = pd.Timestamp(composer_data.get('start_date', '1900-01-01'))
+    composer_end = pd.Timestamp(composer_data.get('end_date', '2100-01-01'))
+    backtest_start = pd.Timestamp(start_date)
+    backtest_end = pd.Timestamp(end_date)
+    
+    if backtest_start < composer_start or backtest_end > composer_end:
+        diagnosis['timing_issues'].append(f"Backtest dates ({backtest_start} to {backtest_end}) extend beyond Composer data range ({composer_start} to {composer_end})")
+        st.error(f"❌ Date mismatch: Backtest extends beyond available Composer data")
+    
+    # 2. Strategy Interpretation Analysis
+    st.subheader("📊 Strategy Interpretation Analysis")
+    
+    if 'strategy_data' in locals():
+        strategy_nodes = count_strategy_nodes(strategy_data)
+        conditional_nodes = count_conditional_nodes(strategy_data)
+        filter_nodes = count_filter_nodes(strategy_data)
+        
+        st.info(f"Strategy complexity: {strategy_nodes} total nodes, {conditional_nodes} conditional nodes, {filter_nodes} filter nodes")
+        
+        # Check for complex nested logic
+        if conditional_nodes > 5:
+            diagnosis['strategy_interpretation_issues'].append("High number of conditional nodes may cause interpretation differences")
+            st.warning("⚠️ High number of conditional nodes detected - interpretation differences likely")
+        
+        # Check rebalance frequency
+        rebalance_freq = strategy_data.get('rebalance', 'daily')
+        st.info(f"Rebalance frequency: {rebalance_freq}")
+        
+        if rebalance_freq != 'daily':
+            diagnosis['strategy_interpretation_issues'].append(f"Non-daily rebalancing ({rebalance_freq}) may cause timing mismatches")
+    
+    # 3. Daily Mismatch Analysis
+    st.subheader("📅 Daily Mismatch Analysis")
+    
+    if not comparison_results.empty:
+        # Find worst matching days
+        worst_days = comparison_results.nsmallest(5, 'Asset_Selection_Match')
+        
+        st.write("**Worst matching days:**")
+        for _, day in worst_days.iterrows():
+            match_rate = day['Asset_Selection_Match'] * 100
+            st.write(f"- {day['Date_Str']}: {match_rate:.1f}% match")
+            st.write(f"  InHouse: {day['InHouse_Assets']}")
+            st.write(f"  Composer: {day['Composer_Assets']}")
+            st.write(f"  Missing: {day['Missing_In_InHouse']}")
+            st.write(f"  Extra: {day['Extra_In_InHouse']}")
+            st.write("---")
+        
+        # Analyze mismatch patterns
+        perfect_matches = (comparison_results['Asset_Selection_Match'] == 1.0).sum()
+        total_days = len(comparison_results)
+        avg_match = comparison_results['Asset_Selection_Match'].mean() * 100
+        
+        diagnosis['summary'] = {
+            'total_days': total_days,
+            'perfect_matches': perfect_matches,
+            'avg_match_rate': avg_match,
+            'mismatch_days': total_days - perfect_matches
+        }
+        
+        st.success(f"📈 Summary: {perfect_matches}/{total_days} perfect matches ({avg_match:.1f}% average)")
+    
+    # 4. Asset Selection Pattern Analysis
+    st.subheader("🎯 Asset Selection Pattern Analysis")
+    
+    if not comparison_results.empty:
+        # Check if mismatches are systematic or random
+        mismatch_days = comparison_results[comparison_results['Asset_Selection_Match'] < 1.0]
+        
+        if not mismatch_days.empty:
+            # Analyze common missing/extra assets
+            all_missing = []
+            all_extra = []
+            
+            for _, day in mismatch_days.iterrows():
+                if day['Missing_In_InHouse']:
+                    all_missing.extend(day['Missing_In_InHouse'].split(', '))
+                if day['Extra_In_InHouse']:
+                    all_extra.extend(day['Extra_In_InHouse'].split(', '))
+            
+            from collections import Counter
+            missing_counts = Counter(all_missing)
+            extra_counts = Counter(all_extra)
+            
+            if missing_counts:
+                st.write("**Most frequently missing in InHouse:**")
+                for asset, count in missing_counts.most_common(5):
+                    st.write(f"- {asset}: {count} times")
+            
+            if extra_counts:
+                st.write("**Most frequently extra in InHouse:**")
+                for asset, count in extra_counts.most_common(5):
+                    st.write(f"- {asset}: {count} times")
+    
+    # 5. Generate Recommendations
+    st.subheader("💡 Recommendations")
+    
+    recommendations = []
+    
+    if diagnosis['data_quality_issues']:
+        recommendations.append("🔧 Fix data quality issues first - ensure all required symbols are available")
+    
+    if diagnosis['timing_issues']:
+        recommendations.append("⏰ Align backtest dates with available Composer data range")
+    
+    if diagnosis['strategy_interpretation_issues']:
+        recommendations.append("🧠 Review strategy interpretation - complex conditional logic may need manual verification")
+    
+    if diagnosis['indicator_calculation_issues']:
+        recommendations.append("📊 Verify technical indicator calculations match Composer's implementation")
+    
+    if diagnosis['filter_logic_issues']:
+        recommendations.append("🔍 Check filter logic implementation - sorting and selection criteria may differ")
+    
+    # Add general recommendations
+    recommendations.extend([
+        "📋 Enable debug mode to see step-by-step strategy evaluation",
+        "🔄 Check if Composer uses different rebalancing logic or timing",
+        "📈 Verify indicator window parameters match exactly",
+        "🎯 Compare individual day results to identify specific failure points"
+    ])
+    
+    for rec in recommendations:
+        st.write(f"• {rec}")
+    
+    diagnosis['recommendations'] = recommendations
+    
+    return diagnosis
+
 def main():
     st.title("📈 Composer Strategy Backtester")
     st.markdown("Compare your in-house strategy logic with Composer's actual allocations")
@@ -1230,6 +1396,15 @@ def main():
     # Sidebar for inputs
     with st.sidebar:
         st.header("Settings")
+        
+        # Debug mode toggle
+        debug_mode = st.checkbox("🐛 Debug Mode", value=False, 
+                                help="Enable detailed logging for troubleshooting")
+        if debug_mode:
+            st.session_state.debug_mode = True
+            st.sidebar.info("Debug mode enabled - detailed logs will be shown")
+        else:
+            st.session_state.debug_mode = False
         
         # Data source selection - allow both
         st.subheader("Data Sources")
@@ -1467,11 +1642,14 @@ def main():
         st.subheader("🔄 Run Both Backtests & Comparison")
         st.info("📋 You have both JSON strategy and Composer data. Click below to run both backtests and generate comparison!")
         
-        if st.button("🚀 Run Both Backtests & Comparison", type="primary", use_container_width=True):
-            if not HAS_YFINANCE:
-                st.error("Cannot run backtest without yfinance. Please install required dependencies.")
-                st.code("pip install yfinance plotly")
-                return
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🚀 Run Both Backtests & Comparison", type="primary", use_container_width=True):
+                if not HAS_YFINANCE:
+                    st.error("Cannot run backtest without yfinance. Please install required dependencies.")
+                    st.code("pip install yfinance plotly")
+                    return
             
             try:
                 with st.spinner("🔄 Running both backtests and generating comparison..."):
@@ -1518,6 +1696,11 @@ def main():
                     # Display comparison results
                     display_comparison_results(comparison_results, inhouse_results, composer_allocations, initial_capital)
                     
+                    # Run comprehensive mismatch diagnosis
+                    st.subheader("🔍 Mismatch Diagnosis")
+                    diagnosis = diagnose_mismatch(strategy_data, composer_data, comparison_results, 
+                                               inhouse_results, composer_allocations, start_date, end_date)
+                    
                     # Generate comprehensive debug file
                     generate_debug_file(comparison_results, inhouse_results, composer_allocations, 
                                       strategy_data, composer_data, start_date, end_date, initial_capital)
@@ -1528,6 +1711,50 @@ def main():
                 st.error(f"Error during backtest and comparison: {str(e)}")
                 import traceback
                 st.error(f"Detailed error: {traceback.format_exc()}")
+        
+        with col2:
+            if st.button("🔍 Run Mismatch Diagnosis Only", type="secondary", use_container_width=True):
+                if not HAS_YFINANCE:
+                    st.error("Cannot run diagnosis without yfinance. Please install required dependencies.")
+                    st.code("pip install yfinance plotly")
+                    return
+                
+                try:
+                    with st.spinner("🔍 Running mismatch diagnosis..."):
+                        # Run in-house backtest for diagnosis
+                        backtester = ComposerBacktester()
+                        backtester.cash = initial_capital
+                        
+                        inhouse_results = backtester.run_backtest(
+                            strategy_data, 
+                            start_date.strftime('%Y-%m-%d'),
+                            end_date.strftime('%Y-%m-%d')
+                        )
+                        
+                        # Get Composer data
+                        composer_data = st.session_state.composer_data
+                        composer_allocations = composer_data['allocations_df']
+                        
+                        # Run comparison for diagnosis
+                        comparison_results = compare_allocations(
+                            inhouse_results, 
+                            composer_allocations, 
+                            composer_data['tickers'],
+                            start_date,
+                            end_date
+                        )
+                        
+                        # Run comprehensive diagnosis
+                        st.subheader("🔍 Detailed Mismatch Diagnosis")
+                        diagnosis = diagnose_mismatch(strategy_data, composer_data, comparison_results, 
+                                                   inhouse_results, composer_allocations, start_date, end_date)
+                        
+                        st.success("🔍 Diagnosis completed! Check the analysis above for insights.")
+                        
+                except Exception as e:
+                    st.error(f"Error during diagnosis: {str(e)}")
+                    import traceback
+                    st.error(f"Detailed error: {traceback.format_exc()}")
     
     elif has_json:
         st.subheader("🚀 Run In-House Backtest")
