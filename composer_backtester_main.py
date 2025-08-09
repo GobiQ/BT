@@ -647,6 +647,9 @@ class ComposerBacktester:
         
         st.info(f"Backtesting over {len(trading_dates)} trading days...")
         
+        # Create progress bar
+        progress_bar = st.progress(0)
+        
         # Initialize backtest
         results = []
         portfolio_value = self.cash
