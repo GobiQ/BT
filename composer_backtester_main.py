@@ -1364,7 +1364,18 @@ def display_comparison_results(comparison_results: pd.DataFrame, inhouse_results
     # Create a more readable comparison table
     display_df = comparison_results[['Date', 'InHouse_Assets', 'Composer_Assets', 'Asset_Selection_Match', 'Rebalanced']].copy()
     display_df['Asset_Selection_Match'] = display_df['Asset_Selection_Match'].apply(lambda x: f"{x*100:.1f}%")
-    display_df['Date'] = display_df['Date'].dt.date
+    
+    # Safely convert Date column to datetime if needed, then extract date
+    try:
+        if pd.api.types.is_datetime64_any_dtype(display_df['Date']):
+            display_df['Date'] = display_df['Date'].dt.date
+        else:
+            # Convert string dates to datetime first
+            display_df['Date'] = pd.to_datetime(display_df['Date']).dt.date
+    except Exception as e:
+        # Fallback: just convert to string representation
+        display_df['Date'] = display_df['Date'].astype(str)
+        st.warning(f"⚠️ Date conversion issue: {e}")
     
     st.dataframe(display_df, use_container_width=True)
     
@@ -1378,7 +1389,18 @@ def display_comparison_results(comparison_results: pd.DataFrame, inhouse_results
         
         with st.expander("View Mismatch Details"):
             for _, row in mismatches.iterrows():
-                st.write(f"**{row['Date'].date()}**")
+                # Safely handle the Date column
+                try:
+                    if hasattr(row['Date'], 'date'):
+                        date_str = row['Date'].date()
+                    elif pd.api.types.is_datetime64_any_dtype(row['Date']):
+                        date_str = pd.to_datetime(row['Date']).date()
+                    else:
+                        date_str = str(row['Date'])
+                except:
+                    date_str = str(row['Date'])
+                    
+                st.write(f"**{date_str}**")
                 st.write(f"- In-House: {row['InHouse_Assets']}")
                 st.write(f"- Composer: {row['Composer_Assets']}")
                 st.write(f"- Match Rate: {row['Asset_Selection_Match']*100:.1f}%")
