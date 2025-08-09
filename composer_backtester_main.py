@@ -2877,8 +2877,9 @@ def main():
     # Check what data sources are available
     has_json = strategy_data is not None
     has_composer = hasattr(st.session_state, 'composer_data')
+    has_composer_url = bool(composer_url.strip()) if composer_url else False
     
-    if not has_json and not has_composer:
+    if not has_json and not has_composer and not has_composer_url:
         st.info("👆 Upload a Composer strategy JSON file and/or enter a Composer URL to get started!")
         return
     
@@ -2897,6 +2898,119 @@ def main():
         # Show strategy tree
         with st.expander("View Strategy Structure"):
             st.json(strategy_data)
+        
+        # Add specific asset diagnosis feature - always available when JSON is loaded
+        st.markdown("---")
+        st.subheader("🎯 Specific Asset Diagnosis")
+        st.markdown("Diagnose why a specific asset wasn't selected on a specific date")
+        
+        # Date and asset selection
+        col_date, col_asset = st.columns(2)
+        with col_date:
+            diagnosis_date = st.date_input(
+                "Select Date to Diagnose",
+                value=start_date,
+                min_value=start_date,
+                max_value=end_date,
+                help="Choose a date where you want to diagnose asset selection"
+            )
+        
+        with col_asset:
+            expected_assets = ["TQQQ", "UVXY", "TECL", "SOXL", "SQQQ", "BSV"]
+            expected_asset = st.selectbox(
+                "Expected Asset",
+                options=expected_assets,
+                help="Select the asset that should have been chosen on this date"
+            )
+        
+        if st.button("🔍 Diagnose Asset Selection", type="primary", use_container_width=True):
+            if not HAS_YFINANCE:
+                st.error("Cannot run diagnosis without yfinance. Please install required dependencies.")
+                st.code("pip install yfinance plotly")
+                return
+            
+            try:
+                with st.spinner(f"🔍 Diagnosing why {expected_asset} wasn't selected on {diagnosis_date}..."):
+                    # Create backtester instance
+                    backtester = ComposerBacktester()
+                    backtester.cash = initial_capital
+                    
+                    # Download data for the specific date range
+                    symbols = list(strategy_data.get('symbols', []))
+                    if not symbols:
+                        # Extract symbols from strategy if not explicitly defined
+                        symbols = backtester.extract_all_symbols(strategy_data)
+                    
+                    # Download data for a window around the diagnosis date
+                    start_window = (pd.Timestamp(diagnosis_date) - pd.Timedelta(days=30)).strftime('%Y-%m-%d')
+                    end_window = (pd.Timestamp(diagnosis_date) + pd.Timedelta(days=30)).strftime('%Y-%m-%d')
+                    backtester.download_data(symbols, start_window, end_window)
+                    
+                    # Run the diagnosis
+                    diagnosis = backtester.diagnose_strategy_failure(
+                        strategy=strategy_data,
+                        date=pd.Timestamp(diagnosis_date),
+                        expected_asset=expected_asset
+                    )
+                    
+                    # Display the diagnosis results
+                    st.subheader(f"🔍 Diagnosis Results for {expected_asset} on {diagnosis_date}")
+                    
+                    # Show actual vs expected selection
+                    col_expected, col_actual = st.columns(2)
+                    with col_expected:
+                        st.metric("Expected Asset", expected_asset)
+                    with col_actual:
+                        actual_selection = diagnosis.get('actual_selection', [])
+                        if actual_selection:
+                            st.metric("Actually Selected", ", ".join(actual_selection))
+                        else:
+                            st.metric("Actually Selected", "None")
+                    
+                    # Show RSI values
+                    if diagnosis.get('rsi_values'):
+                        st.subheader("📊 RSI Values")
+                        rsi_df = pd.DataFrame(diagnosis['rsi_values']).T
+                        st.dataframe(rsi_df, use_container_width=True)
+                    
+                    # Show Moving Average analysis
+                    if diagnosis.get('ma_values'):
+                        st.subheader("📈 Moving Average Analysis")
+                        ma_df = pd.DataFrame(diagnosis['ma_values']).T
+                        st.dataframe(ma_df, use_container_width=True)
+                    
+                    # Show condition evaluations
+                    if diagnosis.get('condition_evaluations'):
+                        st.subheader("✅ Condition Evaluations")
+                        for condition in diagnosis['condition_evaluations']:
+                            status = "✅" if condition.get('met') else "❌"
+                            st.write(f"{status} {condition['condition']}")
+                            if 'value' in condition:
+                                st.write(f"   Value: {condition['value']}")
+                            if 'threshold' in condition:
+                                st.write(f"   Threshold: {condition['threshold']}")
+                    
+                    # Show filter results
+                    if diagnosis.get('filter_results'):
+                        st.subheader("🔍 Filter Results")
+                        st.json(diagnosis['filter_results'])
+                    
+                    # Show identified issues
+                    if diagnosis.get('issues'):
+                        st.subheader("🚨 Issues Identified")
+                        for issue in diagnosis['issues']:
+                            st.error(f"• {issue}")
+                    
+                    # Show raw diagnosis data
+                    with st.expander("📋 Raw Diagnosis Data"):
+                        st.json(diagnosis)
+                    
+                    st.success(f"🔍 Asset diagnosis completed for {expected_asset} on {diagnosis_date}")
+                    
+            except Exception as e:
+                st.error(f"Error during asset diagnosis: {str(e)}")
+                import traceback
+                st.error(f"Detailed error: {traceback.format_exc()}")
     
     # Display Composer strategy info if available
     if has_composer:
@@ -3004,11 +3118,80 @@ def main():
                 st.error(f"Error during unified comparison: {str(e)}")
                 import traceback
                 st.error(f"Detailed error: {traceback.format_exc()}")
+        
+        # NEW: Standalone Diagnose Mismatch Section for JSON + URL scenario
+        st.divider()
+        st.subheader("🔍 Standalone Mismatch Diagnosis")
+        st.info("💡 This section allows you to run mismatch diagnosis independently, even if you haven't run the full comparison yet.")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🔍 Run Standalone Diagnosis", type="primary", use_container_width=True, key="standalone_diagnosis_json_url"):
+                with st.spinner("Running standalone mismatch diagnosis..."):
+                    try:
+                        # Run in-house backtest
+                        st.info("🔄 Running in-house backtest...")
+                        backtester = ComposerBacktester()
+                        backtester.cash = initial_capital
+                        
+                        inhouse_results = backtester.run_backtest(
+                            strategy_data, 
+                            start_date.strftime('%Y-%m-%d'),
+                            end_date.strftime('%Y-%m-%d')
+                        )
+                        
+                        # Fetch Composer data for diagnosis
+                        st.info("🔄 Fetching Composer data for diagnosis...")
+                        fetch_start_str = start_date.strftime('%Y-%m-%d')
+                        fetch_end_str = end_date.strftime('%Y-%m-%d')
+                        
+                        allocations_df, symphony_name, tickers = fetch_composer_backtest(
+                            composer_url, fetch_start_str, fetch_end_str
+                        )
+                        
+                        composer_data = {
+                            'allocations_df': allocations_df,
+                            'symphony_name': symphony_name,
+                            'tickers': tickers,
+                            'start_date': fetch_start_str,
+                            'end_date': fetch_end_str
+                        }
+                        composer_allocations = allocations_df
+                        
+                        # Run comparison for diagnosis
+                        comparison_results = compare_allocations(
+                            inhouse_results, 
+                            composer_allocations, 
+                            tickers,
+                            start_date,
+                            end_date
+                        )
+                        
+                        # Run diagnosis
+                        st.subheader("🔍 Detailed Mismatch Diagnosis")
+                        diagnosis_results = diagnose_mismatch(
+                            strategy_data, composer_data, comparison_results, 
+                            inhouse_results, composer_allocations, start_date, end_date
+                        )
+                        
+                        st.success("✅ Standalone diagnosis completed successfully!")
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error during standalone diagnosis: {str(e)}")
+                        st.exception(e)
+        
+        with col2:
+            st.info("📋 **What this does:**\n\n• Runs in-house backtest\n• Fetches Composer data\n• Compares results\n• Provides detailed mismatch analysis\n• Works independently of other features")
     
     # NEW: Single button to run both backtests and comparison when both data sources are available
-    elif has_json and has_composer:
+    if has_json and (has_composer or has_composer_url):
         st.subheader("🔄 Run Both Backtests & Comparison")
-        st.info("📋 You have both JSON strategy and Composer data. Click below to run both backtests and generate comparison!")
+        
+        if has_composer:
+            st.info("📋 You have both JSON strategy and Composer data. Click below to run both backtests and generate comparison!")
+        else:
+            st.info("📋 You have JSON strategy and Composer URL. Click below to automatically fetch Composer data and run comparison!")
         
         col1, col2 = st.columns(2)
         
@@ -3080,6 +3263,75 @@ def main():
                 import traceback
                 st.error(f"Detailed error: {traceback.format_exc()}")
         
+        # NEW: Standalone Diagnose Mismatch Section
+        st.divider()
+        st.subheader("🔍 Standalone Mismatch Diagnosis")
+        st.info("💡 This section allows you to run mismatch diagnosis independently, even if you haven't run the full comparison yet.")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🔍 Run Standalone Diagnosis", type="primary", use_container_width=True):
+                with st.spinner("Running standalone mismatch diagnosis..."):
+                    try:
+                        # Run in-house backtest
+                        st.info("🔄 Running in-house backtest...")
+                        backtester = ComposerBacktester()
+                        backtester.cash = initial_capital
+                        
+                        inhouse_results = backtester.run_backtest(
+                            strategy_data, 
+                            start_date.strftime('%Y-%m-%d'),
+                            end_date.strftime('%Y-%m-%d')
+                        )
+                        
+                        # Get or fetch Composer data
+                        if has_composer:
+                            composer_data = st.session_state.composer_data
+                            composer_allocations = composer_data['allocations_df']
+                        else:
+                            st.info("🔄 Fetching Composer data for diagnosis...")
+                            fetch_start_str = start_date.strftime('%Y-%m-%d')
+                            fetch_end_str = end_date.strftime('%Y-%m-%d')
+                            
+                            allocations_df, symphony_name, tickers = fetch_composer_backtest(
+                                composer_url, fetch_start_str, fetch_end_str
+                            )
+                            
+                            composer_data = {
+                                'allocations_df': allocations_df,
+                                'symphony_name': symphony_name,
+                                'tickers': tickers,
+                                'start_date': fetch_start_str,
+                                'end_date': fetch_end_str
+                            }
+                            composer_allocations = allocations_df
+                        
+                        # Run comparison for diagnosis
+                        comparison_results = compare_allocations(
+                            inhouse_results, 
+                            composer_allocations, 
+                            composer_data['tickers'],
+                            start_date,
+                            end_date
+                        )
+                        
+                        # Run diagnosis
+                        st.subheader("🔍 Detailed Mismatch Diagnosis")
+                        diagnosis_results = diagnose_mismatch(
+                            strategy_data, composer_data, comparison_results, 
+                            inhouse_results, composer_allocations, start_date, end_date
+                        )
+                        
+                        st.success("✅ Standalone diagnosis completed successfully!")
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error during standalone diagnosis: {str(e)}")
+                        st.exception(e)
+        
+        with col2:
+            st.info("📋 **What this does:**\n\n• Runs in-house backtest\n• Fetches Composer data if needed\n• Compares results\n• Provides detailed mismatch analysis\n• Works independently of other features")
+        
         with col2:
             if st.button("🔍 Run Mismatch Diagnosis Only", type="secondary", use_container_width=True):
                 if not HAS_YFINANCE:
@@ -3099,9 +3351,28 @@ def main():
                             end_date.strftime('%Y-%m-%d')
                         )
                         
-                        # Get Composer data
-                        composer_data = st.session_state.composer_data
-                        composer_allocations = composer_data['allocations_df']
+                        # Check if we have Composer data, if not fetch it
+                        if has_composer:
+                            composer_data = st.session_state.composer_data
+                            composer_allocations = composer_data['allocations_df']
+                        else:
+                            # Fetch Composer data for diagnosis
+                            st.info("🔄 Fetching Composer data for diagnosis...")
+                            fetch_start_str = start_date.strftime('%Y-%m-%d')
+                            fetch_end_str = end_date.strftime('%Y-%m-%d')
+                            
+                            allocations_df, symphony_name, tickers = fetch_composer_backtest(
+                                composer_url, fetch_start_str, fetch_end_str
+                            )
+                            
+                            composer_data = {
+                                'allocations_df': allocations_df,
+                                'symphony_name': symphony_name,
+                                'tickers': tickers,
+                                'start_date': fetch_start_str,
+                                'end_date': fetch_end_str
+                            }
+                            composer_allocations = allocations_df
                         
                         # Run comparison for diagnosis
                         comparison_results = compare_allocations(
