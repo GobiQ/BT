@@ -78,7 +78,52 @@ def run_stock_strategy(trips, S, initial_capital=10000):
         ))
     return trades
 
-def get_strategy_explanation(strategy_name):
+def run_0dte_call(trips, S, iv, rf, max_days, otm_pct, slippage, commission, contract_mult):
+    """Run 0DTE call strategy - very short-term, high gamma plays"""
+    trades = []
+    for (d_in, d_out) in trips:
+        if d_in not in S.index or d_out not in S.index:
+            continue
+        
+        # For 0DTE, we limit the holding period regardless of signal
+        actual_exit = min(d_out, d_in + pd.Timedelta(days=max_days))
+        if actual_exit not in S.index:
+            # Find next available trading day
+            available_dates = S.index[S.index > actual_exit]
+            if len(available_dates) == 0:
+                continue
+            actual_exit = available_dates[0]
+        
+        S_in, S_out = float(S.loc[d_in]), float(S.loc[actual_exit])
+        
+        # Very short DTE
+        T_in = annualize_days(max_days) if max_days > 0 else 1/365  # Minimum time value
+        r_in = float(rf.loc[d_in])
+        sig_in = float(iv.loc[d_in])
+        
+        # Slightly OTM strike for 0DTE (smaller moves expected)
+        K = nearest_strike(S_in * (1 + otm_pct))
+        entry_price = black_scholes_call_price(S_in, K, T_in, r_in, sig_in)
+        
+        # Exit pricing - either intrinsic value or small time value
+        days_elapsed = max((actual_exit - d_in).days, 0)
+        T_out = annualize_days(max(max_days - days_elapsed, 0))
+        r_out = float(rf.loc[actual_exit])
+        sig_out = float(iv.loc[actual_exit])
+        
+        if T_out <= 0:
+            # At expiration, only intrinsic value
+            exit_price = max(S_out - K, 0.0)
+        else:
+            exit_price = black_scholes_call_price(S_out, K, T_out, r_out, sig_out)
+
+        pnl = (exit_price - entry_price) * contract_mult - 2*(slippage + commission)
+        pnl_pct = (exit_price - entry_price) / max(entry_price, 1e-9)
+
+        hold_days = (actual_exit - d_in).days
+        trades.append(Trade(d_in, actual_exit, entry_price, exit_price, pnl, pnl_pct, 
+                          f"K={K}, OTM={otm_pct:.1%}, Hold={hold_days}d"))
+    return trades
     """Return explanation text for each strategy"""
     explanations = {
         "ATM Call": """
@@ -357,6 +402,11 @@ def main():
     dte_otm = st.sidebar.slider("OTM Call DTE", 7, 30, 14)
     otm_percentage = st.sidebar.slider("OTM Call % Above Spot", 0.01, 0.10, 0.05, format="%.2f")
     
+    # 0DTE parameters
+    st.sidebar.subheader("0DTE Parameters")
+    dte_0dte = st.sidebar.slider("0DTE Call Days", 0, 2, 0, help="0=Same day exit, 1=Next day exit, 2=Two day max hold")
+    otm_0dte_pct = st.sidebar.slider("0DTE OTM % Above Spot", 0.005, 0.03, 0.01, format="%.3f", help="Typically smaller moves for 0DTE")
+    
     # Cost parameters
     st.sidebar.subheader("Cost Parameters")
     slippage_per_leg = st.sidebar.number_input("Slippage per Leg ($)", 0.0, 0.10, 0.02)
@@ -367,12 +417,13 @@ def main():
     st.sidebar.subheader("Strategies to Run")
     run_atm = st.sidebar.checkbox("ATM Call", True)
     run_otm = st.sidebar.checkbox("OTM Call", True)
+    run_0dte = st.sidebar.checkbox("0DTE Call", True)
     
     st.sidebar.subheader("Stock Comparison Backtest")
     compare_ticker = st.sidebar.selectbox("Compare with Stock/ETF", ["QQQ", "QLD", "TQQQ"], index=0)
     run_stock = st.sidebar.checkbox("Include Stock Comparison", True)
     
-    st.sidebar.info("💡 **Strategy Comparison:**\n\n**ATM Calls:** Higher cost, lower risk, steady gains\n\n**OTM Calls:** Lower cost, higher leverage, more volatile but potentially higher returns\n\n**Stock/ETF:** Direct exposure, no time decay, unlimited holding period")
+    st.sidebar.info("💡 **Strategy Comparison:**\n\n**ATM Calls:** Higher cost, lower risk, steady gains\n\n**OTM Calls:** Lower cost, higher leverage, more volatile\n\n**0DTE Calls:** Extreme leverage, very short-term, high gamma\n\n**Stock/ETF:** Direct exposure, no time decay, unlimited holding period")
     
     if st.sidebar.button("Run Backtest", type="primary"):
         with st.spinner("Building signal and fetching data..."):
@@ -451,7 +502,10 @@ def main():
                                         slippage_per_leg, commission_per_leg, contract_mult)
                 strat_trades["OTM Call"] = otm_trades
             
-            if run_stock:
+            if run_0dte:
+                dte_0dte_trades = run_0dte_call(trips, S, iv, rf, dte_0dte, otm_0dte_pct,
+                                              slippage_per_leg, commission_per_leg, contract_mult)
+                strat_trades["0DTE Call"] = dte_0dte_trades
                 try:
                     with st.spinner(f"Loading {compare_ticker} data..."):
                         # Get comparison ticker data
