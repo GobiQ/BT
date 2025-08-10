@@ -643,4 +643,89 @@ def main():
         ]
         
         display_df = df[display_columns].copy()
-        display_df['InHouse_Daily_Return
+        display_df['InHouse_Daily_Return'] = display_df['InHouse_Daily_Return'].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
+        display_df['Composer_Daily_Return'] = display_df['Composer_Daily_Return'].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
+        display_df['Relative_Daily_Return'] = display_df['Relative_Daily_Return'].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
+        
+        st.dataframe(display_df, use_container_width=True, height=400)
+        
+        # Summary statistics
+        st.subheader("📈 Summary Statistics")
+        summary_stats = df[['InHouse_Portfolio_Value', 'Composer_Portfolio_Value', 'Relative_Performance']].describe()
+        st.dataframe(summary_stats, use_container_width=True)
+        
+        # Download data
+        csv = df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Portfolio Data as CSV",
+            data=csv,
+            file_name=f"portfolio_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+
+    # Footer with additional insights
+    st.markdown("---")
+    st.markdown("## 🎯 Key Insights")
+    
+    insights_col1, insights_col2 = st.columns(2)
+    
+    with insights_col1:
+        st.markdown("### 📊 Performance Summary")
+        
+        if metrics['relative_mean_return'] > 0:
+            performance_text = f"✅ InHouse portfolio outperformed by {metrics['relative_mean_return']:.4%} daily on average"
+        else:
+            performance_text = f"❌ InHouse portfolio underperformed by {abs(metrics['relative_mean_return']):.4%} daily on average"
+        
+        st.markdown(f"""
+        - {performance_text}
+        - InHouse win rate: {metrics['inhouse_win_rate']:.1%}
+        - Outperformance rate: {metrics['outperformance_rate']:.1%}
+        - Information ratio: {metrics['information_ratio']:.3f}
+        """)
+    
+    with insights_col2:
+        st.markdown("### 🔬 Statistical Confidence")
+        
+        confidence_items = []
+        if metrics['relative_return_significant']:
+            if metrics['relative_mean_return'] > 0:
+                confidence_items.append("✅ Outperformance is statistically significant")
+            else:
+                confidence_items.append("❌ Underperformance is statistically significant")
+        else:
+            confidence_items.append("⚠️ Performance difference is not statistically significant")
+        
+        if metrics['inhouse_winrate_significant']:
+            confidence_items.append("✅ Win rate is significantly different from 50%")
+        else:
+            confidence_items.append("⚠️ Win rate is not significantly different from 50%")
+        
+        if metrics['outperformance_significant']:
+            confidence_items.append("✅ Outperformance rate is significantly different from 50%")
+        else:
+            confidence_items.append("⚠️ Outperformance rate is not significantly different from 50%")
+        
+        for item in confidence_items:
+            st.markdown(f"- {item}")
+
+    # Technical notes
+    with st.expander("📝 Technical Notes"):
+        st.markdown("""
+        **Statistical Tests Performed:**
+        - **T-tests**: Test if mean returns are significantly different from zero
+        - **Binomial tests**: Test if win rates are significantly different from 50%
+        - **Information Ratio**: Measures risk-adjusted outperformance
+        
+        **Definitions:**
+        - **Win Rate**: Percentage of days with positive returns
+        - **Outperformance Rate**: Percentage of days InHouse beats Composer
+        - **Information Ratio**: Annualized relative return / relative return volatility
+        - **Statistical Significance**: p-value < 0.05 (95% confidence level)
+        
+        **Data Source**: Yahoo Finance via yfinance library
+        **Assumptions**: Equal weighting within portfolios, daily rebalancing
+        """)
+
+if __name__ == "__main__":
+    main()
