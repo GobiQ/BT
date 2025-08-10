@@ -296,26 +296,21 @@ def main():
     # Options parameters
     st.sidebar.subheader("Options Parameters")
     dte_atm = st.sidebar.slider("ATM Call DTE", 7, 30, 14)
-    dte_vertical = st.sidebar.slider("Vertical Spreads DTE", 7, 30, 14)
-    
-    # Risk parameters
-    st.sidebar.subheader("Risk Parameters")
-    delta_itm_long = st.sidebar.slider("ITM Call Delta", 0.5, 0.8, 0.6)
-    delta_short_put = st.sidebar.slider("Short Put Delta", 0.15, 0.35, 0.25)
-    spread_pct = st.sidebar.slider("Spread Width %", 0.01, 0.05, 0.03)
+    dte_otm = st.sidebar.slider("OTM Call DTE", 7, 30, 14)
+    otm_percentage = st.sidebar.slider("OTM Call % Above Spot", 0.01, 0.10, 0.05, format="%.2f")
     
     # Cost parameters
     st.sidebar.subheader("Cost Parameters")
-    slippage_per_leg = st.sidebar.number_input("Slippage per Leg ($)", 0.0, 0.10, 0.03)
+    slippage_per_leg = st.sidebar.number_input("Slippage per Leg ($)", 0.0, 0.10, 0.02)
     commission_per_leg = st.sidebar.number_input("Commission per Leg ($)", 0.0, 1.0, 0.0)
     contract_mult = st.sidebar.number_input("Contract Multiplier", 50, 200, 100)
     
     # Strategy selection
     st.sidebar.subheader("Strategies to Run")
     run_atm = st.sidebar.checkbox("ATM Call", True)
-    run_debit = st.sidebar.checkbox("Call Debit Spread", True)
-    run_put_spread = st.sidebar.checkbox("Bull Put Spread", False)  # Simplified for demo
-    run_diagonal = st.sidebar.checkbox("Call Diagonal", False)    # Simplified for demo
+    run_otm = st.sidebar.checkbox("OTM Call", True)
+    
+    st.sidebar.info("💡 **Strategy Comparison:**\n\n**ATM Calls:** Higher cost, lower risk, steady gains\n\n**OTM Calls:** Lower cost, higher leverage, more volatile but potentially higher returns")
     
     if st.sidebar.button("Run Backtest", type="primary"):
         with st.spinner("Building signal and fetching data..."):
@@ -389,11 +384,10 @@ def main():
                                         slippage_per_leg, commission_per_leg, contract_mult)
                 strat_trades["ATM Call"] = atm_trades
             
-            if run_debit:
-                debit_trades = run_call_debit_spread(trips, S, iv, rf, dte_vertical, 
-                                                   delta_itm_long, spread_pct,
-                                                   slippage_per_leg, commission_per_leg, contract_mult)
-                strat_trades["Call Debit Spread"] = debit_trades
+            if run_otm:
+                otm_trades = run_otm_call(trips, S, iv, rf, dte_otm, otm_percentage,
+                                        slippage_per_leg, commission_per_leg, contract_mult)
+                strat_trades["OTM Call"] = otm_trades
         
         # Results
         if strat_trades:
