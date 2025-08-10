@@ -448,7 +448,7 @@ def main():
                         with st.expander(f"{name} Strategy ({len(trades)} total trades)"):
                             # Show strategy explanation
                             if "Call" in name:
-                                explanation = get_strategy_explanation(name.replace(" Call", " Call"), target, compare_ticker)
+                                explanation = get_strategy_explanation(name, target, compare_ticker)
                             else:
                                 explanation = get_strategy_explanation("Stock", target, compare_ticker)
                             st.markdown(explanation)
