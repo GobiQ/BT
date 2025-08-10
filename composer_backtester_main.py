@@ -7,9 +7,60 @@ import numpy as np
 import yfinance as yf
 from datetime import datetime, timedelta
 import warnings
-from scipy import stats
-from scipy.stats import ttest_1samp, binom_test
+import math
 warnings.filterwarnings('ignore')
+
+# Try to import scipy, fallback to basic implementations if not available
+try:
+    from scipy import stats
+    from scipy.stats import ttest_1samp, binom_test
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    st.warning("⚠️ scipy not available. Using basic statistical implementations.")
+
+def basic_t_test(data, mu=0):
+    """Basic t-test implementation when scipy is not available"""
+    n = len(data)
+    if n <= 1:
+        return 0, 1
+    
+    mean_data = np.mean(data)
+    std_data = np.std(data, ddof=1)
+    
+    if std_data == 0:
+        return float('inf') if mean_data != mu else 0, 1
+    
+    t_stat = (mean_data - mu) / (std_data / math.sqrt(n))
+    
+    # Approximate p-value using normal distribution for large samples
+    if n >= 30:
+        p_value = 2 * (1 - 0.5 * (1 + math.erf(abs(t_stat) / math.sqrt(2))))
+    else:
+        # Very rough approximation for small samples
+        p_value = 2 * (1 - 0.5 * (1 + math.erf(abs(t_stat) / math.sqrt(2))))
+    
+    return t_stat, p_value
+
+def basic_binom_test(successes, trials, p=0.5):
+    """Basic binomial test implementation when scipy is not available"""
+    if trials == 0:
+        return 1.0
+    
+    observed_rate = successes / trials
+    expected_rate = p
+    
+    # Use normal approximation for large samples
+    if trials >= 30:
+        std_error = math.sqrt(p * (1 - p) / trials)
+        z_score = (observed_rate - expected_rate) / std_error
+        # Approximate p-value
+        p_value = 2 * (1 - 0.5 * (1 + math.erf(abs(z_score) / math.sqrt(2))))
+    else:
+        # For small samples, use a simple approximation
+        p_value = 2 * min(observed_rate, 1 - observed_rate) if observed_rate != 0.5 else 1.0
+    
+    return p_value
 
 # Page configuration
 st.set_page_config(
@@ -188,35 +239,59 @@ def calculate_statistical_metrics(df):
     # Statistical Significance Tests
     if len(inhouse_returns) > 1 and len(composer_returns) > 1:
         # Test if InHouse mean return is significantly different from zero
-        t_stat_ih, p_value_ih = ttest_1samp(inhouse_returns, 0)
+        if SCIPY_AVAILABLE:
+            t_stat_ih, p_value_ih = ttest_1samp(inhouse_returns, 0)
+        else:
+            t_stat_ih, p_value_ih = basic_t_test(inhouse_returns, 0)
+        
         metrics['inhouse_return_t_stat'] = t_stat_ih
         metrics['inhouse_return_p_value'] = p_value_ih
         metrics['inhouse_return_significant'] = p_value_ih < 0.05
         
         # Test if Composer mean return is significantly different from zero
-        t_stat_comp, p_value_comp = ttest_1samp(composer_returns, 0)
+        if SCIPY_AVAILABLE:
+            t_stat_comp, p_value_comp = ttest_1samp(composer_returns, 0)
+        else:
+            t_stat_comp, p_value_comp = basic_t_test(composer_returns, 0)
+        
         metrics['composer_return_t_stat'] = t_stat_comp
         metrics['composer_return_p_value'] = p_value_comp
         metrics['composer_return_significant'] = p_value_comp < 0.05
         
         # Test if relative performance is significantly different from zero
-        t_stat_rel, p_value_rel = ttest_1samp(relative_returns, 0)
+        if SCIPY_AVAILABLE:
+            t_stat_rel, p_value_rel = ttest_1samp(relative_returns, 0)
+        else:
+            t_stat_rel, p_value_rel = basic_t_test(relative_returns, 0)
+        
         metrics['relative_return_t_stat'] = t_stat_rel
         metrics['relative_return_p_value'] = p_value_rel
         metrics['relative_return_significant'] = p_value_rel < 0.05
         
         # Test if InHouse win rate is significantly different from 50%
-        p_value_winrate_ih = binom_test(positive_returns, total_returns, 0.5)
+        if SCIPY_AVAILABLE:
+            p_value_winrate_ih = binom_test(positive_returns, total_returns, 0.5)
+        else:
+            p_value_winrate_ih = basic_binom_test(positive_returns, total_returns, 0.5)
+        
         metrics['inhouse_winrate_p_value'] = p_value_winrate_ih
         metrics['inhouse_winrate_significant'] = p_value_winrate_ih < 0.05
         
         # Test if Composer win rate is significantly different from 50%
-        p_value_winrate_comp = binom_test(composer_positive_returns, len(composer_returns), 0.5)
+        if SCIPY_AVAILABLE:
+            p_value_winrate_comp = binom_test(composer_positive_returns, len(composer_returns), 0.5)
+        else:
+            p_value_winrate_comp = basic_binom_test(composer_positive_returns, len(composer_returns), 0.5)
+        
         metrics['composer_winrate_p_value'] = p_value_winrate_comp
         metrics['composer_winrate_significant'] = p_value_winrate_comp < 0.05
         
         # Test if outperformance rate is significantly different from 50%
-        p_value_outperf = binom_test(outperformance_days, len(relative_returns), 0.5)
+        if SCIPY_AVAILABLE:
+            p_value_outperf = binom_test(outperformance_days, len(relative_returns), 0.5)
+        else:
+            p_value_outperf = basic_binom_test(outperformance_days, len(relative_returns), 0.5)
+        
         metrics['outperformance_p_value'] = p_value_outperf
         metrics['outperformance_significant'] = p_value_outperf < 0.05
         
