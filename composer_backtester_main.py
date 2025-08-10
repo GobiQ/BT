@@ -55,6 +55,64 @@ def fetch_prices(tickers: List[str], start: str, end: Optional[str]) -> pd.DataF
     df.index = pd.to_datetime(df.index)
     return df
 
+def run_stock_strategy(trips, S, initial_capital=10000):
+    """Run buy-and-hold stock strategy during signal periods"""
+    trades = []
+    for (d_in, d_out) in trips:
+        if d_in not in S.index or d_out not in S.index:
+            continue
+        
+        entry_price = float(S.loc[d_in])
+        exit_price = float(S.loc[d_out])
+        
+        # Calculate shares we can buy with initial capital
+        shares = initial_capital / entry_price
+        
+        # P&L calculation
+        pnl = (exit_price - entry_price) * shares
+        pnl_pct = (exit_price - entry_price) / entry_price
+        
+        trades.append(Trade(
+            d_in, d_out, entry_price, exit_price, pnl, pnl_pct, 
+            f"Shares={shares:.1f}, Capital=${initial_capital}"
+        ))
+    return trades
+
+def get_strategy_explanation(strategy_name):
+    """Return explanation text for each strategy"""
+    explanations = {
+        "ATM Call": """
+**ATM Call Strategy Rules:**
+• **Entry:** When Tech-Rising signal activates, buy ATM call options
+• **Strike:** Nearest strike to current price
+• **Expiration:** Fixed DTE (Days To Expiration)
+• **Exit:** Sell calls when signal deactivates
+• **Risk:** Limited to premium paid, benefits from upward moves and volatility
+• **Leverage:** ~50 delta provides moderate leverage to underlying moves
+        """,
+        
+        "OTM Call": """
+**OTM Call Strategy Rules:**
+• **Entry:** When Tech-Rising signal activates, buy OTM call options
+• **Strike:** Set percentage above current price
+• **Expiration:** Fixed DTE (Days To Expiration)  
+• **Exit:** Sell calls when signal deactivates
+• **Risk:** Higher chance of expiring worthless, but lower cost
+• **Leverage:** Higher gamma provides more explosive gains if underlying moves favorably
+        """,
+        
+        "Stock": """
+**Stock Strategy Rules:**
+• **Entry:** When Tech-Rising signal activates, buy shares
+• **Position Size:** Fixed dollar amount invested each trade
+• **Hold:** Maintain position while signal remains active
+• **Exit:** Sell shares when signal deactivates
+• **Risk:** Full exposure to stock price movements, no time decay
+• **Leverage:** 1:1 exposure (except TQQQ which is 3x leveraged ETF)
+        """
+    }
+    return explanations.get(strategy_name, "No explanation available.")
+
 def black_scholes_call_price(S, K, T, r, sigma):
     if T <= 0:
         return max(S - K, 0.0)
@@ -453,9 +511,9 @@ def main():
                         with st.expander(f"{name} Strategy ({len(trades)} total trades)"):
                             # Show strategy explanation
                             if "Call" in name:
-                                explanation = get_strategy_explanation(name, target, compare_ticker)
+                                explanation = get_strategy_explanation(name)
                             else:
-                                explanation = get_strategy_explanation("Stock", target, compare_ticker)
+                                explanation = get_strategy_explanation("Stock")
                             st.markdown(explanation)
                             
                             st.markdown("---")
