@@ -394,13 +394,18 @@ def main():
                 strat_trades["OTM Call"] = otm_trades
             
             if run_stock:
-                # Get comparison ticker data
-                compare_S = fetch_prices([compare_ticker], start_date.strftime("%Y-%m-%d"), 
-                                       end_date.strftime("%Y-%m-%d"))[compare_ticker]
-                compare_S = compare_S.reindex(idx)
-                
-                stock_trades = run_stock_strategy(trips, compare_S)
-                strat_trades[f"{compare_ticker} Stock"] = stock_trades
+                try:
+                    with st.spinner(f"Loading {compare_ticker} data..."):
+                        # Get comparison ticker data
+                        compare_S = fetch_prices([compare_ticker], start_date.strftime("%Y-%m-%d"), 
+                                               end_date.strftime("%Y-%m-%d"))[compare_ticker]
+                        compare_S = compare_S.reindex(idx)
+                        
+                        stock_trades = run_stock_strategy(trips, compare_S)
+                        strat_trades[f"{compare_ticker} Stock"] = stock_trades
+                except Exception as e:
+                    st.error(f"Error running stock strategy: {str(e)}")
+                    st.warning("Continuing with options strategies only...")
         
         # Results
         if strat_trades:
