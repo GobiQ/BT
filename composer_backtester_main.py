@@ -288,7 +288,7 @@ def main():
     st.sidebar.header("Configuration")
     
     # Basic parameters
-    target = st.sidebar.selectbox("Target Symbol", ["SPY", "QQQ", "TQQQ"], index=0)
+    target = st.sidebar.selectbox("Target Symbol", ["QQQ", "SPY", "TQQQ"], index=0)
     start_date = st.sidebar.date_input("Start Date", pd.to_datetime("2010-01-01"))
     end_date = st.sidebar.date_input("End Date", pd.to_datetime("today"))
     rsi_length = st.sidebar.slider("RSI Length", 5, 20, 10)
@@ -310,7 +310,11 @@ def main():
     run_atm = st.sidebar.checkbox("ATM Call", True)
     run_otm = st.sidebar.checkbox("OTM Call", True)
     
-    st.sidebar.info("💡 **Strategy Comparison:**\n\n**ATM Calls:** Higher cost, lower risk, steady gains\n\n**OTM Calls:** Lower cost, higher leverage, more volatile but potentially higher returns")
+    st.sidebar.subheader("Stock Comparison Backtest")
+    compare_ticker = st.sidebar.selectbox("Compare with Stock/ETF", ["QQQ", "QLD", "TQQQ"], index=0)
+    run_stock = st.sidebar.checkbox("Include Stock Comparison", True)
+    
+    st.sidebar.info("💡 **Strategy Comparison:**\n\n**ATM Calls:** Higher cost, lower risk, steady gains\n\n**OTM Calls:** Lower cost, higher leverage, more volatile but potentially higher returns\n\n**Stock/ETF:** Direct exposure, no time decay, unlimited holding period")
     
     if st.sidebar.button("Run Backtest", type="primary"):
         with st.spinner("Building signal and fetching data..."):
@@ -388,6 +392,15 @@ def main():
                 otm_trades = run_otm_call(trips, S, iv, rf, dte_otm, otm_percentage,
                                         slippage_per_leg, commission_per_leg, contract_mult)
                 strat_trades["OTM Call"] = otm_trades
+            
+            if run_stock:
+                # Get comparison ticker data
+                compare_S = fetch_prices([compare_ticker], start_date.strftime("%Y-%m-%d"), 
+                                       end_date.strftime("%Y-%m-%d"))[compare_ticker]
+                compare_S = compare_S.reindex(idx)
+                
+                stock_trades = run_stock_strategy(trips, compare_S)
+                strat_trades[f"{compare_ticker} Stock"] = stock_trades
         
         # Results
         if strat_trades:
@@ -429,10 +442,20 @@ def main():
                 st.plotly_chart(fig_equity, use_container_width=True)
                 
                 # Trade details
-                st.subheader("Trade Details")
+                st.subheader("Strategy Details & Trade Results")
                 for name, trades in strat_trades.items():
                     if trades:
-                        with st.expander(f"{name} Trades ({len(trades)} total)"):
+                        with st.expander(f"{name} Strategy ({len(trades)} total trades)"):
+                            # Show strategy explanation
+                            if "Call" in name:
+                                explanation = get_strategy_explanation(name.replace(" Call", " Call"), target, compare_ticker)
+                            else:
+                                explanation = get_strategy_explanation("Stock", target, compare_ticker)
+                            st.markdown(explanation)
+                            
+                            st.markdown("---")
+                            st.markdown("**Trade History:**")
+                            
                             trades_df = pd.DataFrame([t.__dict__ for t in trades])
                             trades_df["pnl_pct"] = (trades_df["pnl_pct"] * 100).round(2)
                             trades_df["pnl"] = trades_df["pnl"].round(2)
