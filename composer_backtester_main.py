@@ -409,6 +409,7 @@ def main():
     
     # Cost parameters
     st.sidebar.subheader("Cost Parameters")
+    initial_capital = st.sidebar.number_input("Starting Capital ($)", 1000, 100000, 10000, step=1000)
     slippage_per_leg = st.sidebar.number_input("Slippage per Leg ($)", 0.0, 0.10, 0.02)
     commission_per_leg = st.sidebar.number_input("Commission per Leg ($)", 0.0, 1.0, 0.0)
     contract_mult = st.sidebar.number_input("Contract Multiplier", 50, 200, 100)
@@ -564,11 +565,51 @@ def main():
                     if trades:
                         with st.expander(f"{name} Strategy ({len(trades)} total trades)"):
                             # Show strategy explanation
-                            if "Call" in name:
-                                explanation = get_strategy_explanation(name)
-                            else:
-                                explanation = get_strategy_explanation("Stock")
-                            st.markdown(explanation)
+                            try:
+                                if "Call" in name:
+                                    if "0DTE" in name:
+                                        explanation = """
+**0DTE Call Strategy Rules:**
+• **Entry:** When Tech-Rising signal activates, buy very short-term OTM calls
+• **Strike:** Small percentage above current price (0.5-3%)
+• **Expiration:** 0-2 days maximum hold period
+• **Exit:** Sell within max hold period OR when signal deactivates (whichever comes first)
+• **Risk:** Extremely high chance of total loss, but very low cost
+• **Leverage:** Maximum gamma exposure - explosive gains on small moves
+                                        """
+                                    elif "OTM" in name:
+                                        explanation = """
+**OTM Call Strategy Rules:**
+• **Entry:** When Tech-Rising signal activates, buy OTM call options
+• **Strike:** Set percentage above current price
+• **Expiration:** Fixed DTE (Days To Expiration)  
+• **Exit:** Sell calls when signal deactivates
+• **Risk:** Higher chance of expiring worthless, but lower cost
+• **Leverage:** Higher gamma provides more explosive gains if underlying moves favorably
+                                        """
+                                    else:  # ATM Call
+                                        explanation = """
+**ATM Call Strategy Rules:**
+• **Entry:** When Tech-Rising signal activates, buy ATM call options
+• **Strike:** Nearest strike to current price
+• **Expiration:** Fixed DTE (Days To Expiration)
+• **Exit:** Sell calls when signal deactivates
+• **Risk:** Limited to premium paid, benefits from upward moves and volatility
+• **Leverage:** ~50 delta provides moderate leverage to underlying moves
+                                        """
+                                else:  # Stock strategy
+                                    explanation = """
+**Stock Strategy Rules:**
+• **Entry:** When Tech-Rising signal activates, buy shares
+• **Position Size:** Fixed dollar amount invested each trade
+• **Hold:** Maintain position while signal remains active
+• **Exit:** Sell shares when signal deactivates
+• **Risk:** Full exposure to stock price movements, no time decay
+• **Leverage:** 1:1 exposure (except TQQQ which is 3x leveraged ETF)
+                                    """
+                                st.markdown(explanation)
+                            except Exception as e:
+                                st.warning(f"Could not load strategy explanation: {e}")
                             
                             st.markdown("---")
                             st.markdown("**Trade History:**")
