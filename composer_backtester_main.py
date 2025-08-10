@@ -4,10 +4,11 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import numpy as np
-import json
-import ast
-from datetime import datetime
+import yfinance as yf
+from datetime import datetime, timedelta
 import warnings
+from scipy import stats
+from scipy.stats import ttest_1samp, binom_test
 warnings.filterwarnings('ignore')
 
 # Page configuration
@@ -41,413 +42,605 @@ st.markdown("""
         padding-left: 12px;
         padding-right: 12px;
     }
+    .significance-box {
+        background-color: #e8f4fd;
+        border-left: 4px solid #1f77b4;
+        padding: 1rem;
+        margin: 1rem 0;
+        border-radius: 0.25rem;
+    }
+    .win-rate-box {
+        background-color: #e8f5e8;
+        border-left: 4px solid #2ca02c;
+        padding: 1rem;
+        margin: 1rem 0;
+        border-radius: 0.25rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 @st.cache_data
-def load_data():
-    """Load and preprocess the CSV data"""
+def fetch_portfolio_data(inhouse_symbols, composer_symbols, start_date, end_date, inhouse_weights=None, composer_weights=None):
+    """Fetch portfolio data from yfinance and calculate comparison metrics"""
     try:
-        df = pd.read_csv('daily_comparison_20250809_170850.csv')
+        # Default equal weights if not provided
+        if inhouse_weights is None:
+            inhouse_weights = [1/len(inhouse_symbols)] * len(inhouse_symbols)
+        if composer_weights is None:
+            composer_weights = [1/len(composer_symbols)] * len(composer_symbols)
         
-        # Convert date columns
-        df['Date'] = pd.to_datetime(df['Date'])
-        df['Date_Str'] = pd.to_datetime(df['Date_Str'])
+        # Fetch price data
+        all_symbols = list(set(inhouse_symbols + composer_symbols))
+        data = yf.download(all_symbols, start=start_date, end=end_date)['Adj Close']
         
-        # Convert boolean column
-        df['Rebalanced'] = df['Rebalanced'].map({'True': True, 'False': False})
+        if len(all_symbols) == 1:
+            data = data.to_frame(all_symbols[0])
         
-        # Sort by date
-        df = df.sort_values('Date')
+        # Calculate portfolio values
+        inhouse_portfolio = pd.Series(0, index=data.index)
+        composer_portfolio = pd.Series(0, index=data.index)
+        
+        # InHouse portfolio
+        for symbol, weight in zip(inhouse_symbols, inhouse_weights):
+            if symbol in data.columns:
+                inhouse_portfolio += data[symbol] * weight
+        
+        # Composer portfolio
+        for symbol, weight in zip(composer_symbols, composer_weights):
+            if symbol in data.columns:
+                composer_portfolio += data[symbol] * weight
+        
+        # Normalize to start at 100,000
+        initial_value = 100000
+        inhouse_portfolio = (inhouse_portfolio / inhouse_portfolio.iloc[0]) * initial_value
+        composer_portfolio = (composer_portfolio / composer_portfolio.iloc[0]) * initial_value
+        
+        # Create comparison dataframe
+        df = pd.DataFrame({
+            'Date': data.index,
+            'InHouse_Portfolio_Value': inhouse_portfolio.values,
+            'Composer_Portfolio_Value': composer_portfolio.values,
+            'InHouse_Assets': ','.join(inhouse_symbols),
+            'Composer_Assets': ','.join(composer_symbols),
+            'Common_Assets': ','.join(set(inhouse_symbols) & set(composer_symbols)),
+            'InHouse_Num_Assets': len(inhouse_symbols),
+            'Composer_Num_Assets': len(composer_symbols)
+        })
+        
+        # Calculate asset selection match (Jaccard similarity)
+        inhouse_set = set(inhouse_symbols)
+        composer_set = set(composer_symbols)
+        intersection = len(inhouse_set & composer_set)
+        union = len(inhouse_set | composer_set)
+        asset_selection_match = intersection / union if union > 0 else 0
+        df['Asset_Selection_Match'] = asset_selection_match
+        
+        # Calculate allocation differences and match scores
+        allocation_diffs = []
+        match_scores = []
+        
+        for _, row in df.iterrows():
+            # Simple allocation difference calculation
+            # For now, assume equal weight difference
+            if len(inhouse_symbols) == len(composer_symbols) and set(inhouse_symbols) == set(composer_symbols):
+                # Same assets, calculate weight differences
+                weight_diff = sum(abs(w1 - w2) for w1, w2 in zip(inhouse_weights, composer_weights))
+                allocation_diffs.append(weight_diff)
+                match_scores.append(1 - weight_diff)  # Higher score for lower differences
+            else:
+                # Different assets
+                allocation_diffs.append(1.0)  # Max difference
+                match_scores.append(asset_selection_match * 0.5)  # Penalize for different assets
+        
+        df['Allocation_Difference'] = allocation_diffs
+        df['Match_Score'] = match_scores
+        df['Rebalanced'] = True  # Assume daily rebalancing for simplicity
+        
+        # Calculate relative performance
+        df['Relative_Performance'] = df['InHouse_Portfolio_Value'] - df['Composer_Portfolio_Value']
+        df['Outperformance_Days'] = df['Relative_Performance'] > 0
         
         return df
+        
     except Exception as e:
-        st.error(f"Error loading data: {e}")
+        st.error(f"Error fetching data: {e}")
         return None
 
-def parse_json_column(df, column_name):
-    """Parse JSON-like strings in a column"""
-    parsed_data = []
-    for value in df[column_name]:
-        try:
-            if pd.isna(value) or value == '':
-                parsed_data.append({})
-            else:
-                # Handle the JSON string format
-                cleaned = value.replace('""', '"')
-                parsed_data.append(json.loads(cleaned))
-        except:
-            parsed_data.append({})
-    return parsed_data
-
-def safe_eval_dict(s):
-    """Safely evaluate dictionary strings"""
-    if pd.isna(s) or s == '':
-        return {}
-    try:
-        # Handle numpy float64 references in string
-        s = str(s).replace('np.float64(', '').replace(')', '')
-        return ast.literal_eval(s)
-    except:
-        return {}
+def calculate_statistical_metrics(df):
+    """Calculate comprehensive statistical metrics including win rates and significance tests"""
+    metrics = {}
+    
+    # Calculate daily returns for both portfolios
+    df['InHouse_Daily_Return'] = df['InHouse_Portfolio_Value'].pct_change()
+    df['Composer_Daily_Return'] = df['Composer_Portfolio_Value'].pct_change()
+    df['Relative_Daily_Return'] = df['InHouse_Daily_Return'] - df['Composer_Daily_Return']
+    
+    inhouse_returns = df['InHouse_Daily_Return'].dropna()
+    composer_returns = df['Composer_Daily_Return'].dropna()
+    relative_returns = df['Relative_Daily_Return'].dropna()
+    
+    # Win Rate Analysis - InHouse Portfolio
+    positive_returns = (inhouse_returns > 0).sum()
+    total_returns = len(inhouse_returns)
+    win_rate = positive_returns / total_returns if total_returns > 0 else 0
+    
+    metrics['inhouse_win_rate'] = win_rate
+    metrics['inhouse_positive_days'] = positive_returns
+    metrics['inhouse_negative_days'] = total_returns - positive_returns
+    metrics['total_trading_days'] = total_returns
+    
+    # Win Rate Analysis - Composer Portfolio
+    composer_positive_returns = (composer_returns > 0).sum()
+    composer_win_rate = composer_positive_returns / len(composer_returns) if len(composer_returns) > 0 else 0
+    
+    metrics['composer_win_rate'] = composer_win_rate
+    metrics['composer_positive_days'] = composer_positive_returns
+    metrics['composer_negative_days'] = len(composer_returns) - composer_positive_returns
+    
+    # Outperformance Analysis
+    outperformance_days = (relative_returns > 0).sum()
+    outperformance_rate = outperformance_days / len(relative_returns) if len(relative_returns) > 0 else 0
+    
+    metrics['outperformance_rate'] = outperformance_rate
+    metrics['outperformance_days'] = outperformance_days
+    metrics['underperformance_days'] = len(relative_returns) - outperformance_days
+    
+    # Statistical Significance Tests
+    if len(inhouse_returns) > 1 and len(composer_returns) > 1:
+        # Test if InHouse mean return is significantly different from zero
+        t_stat_ih, p_value_ih = ttest_1samp(inhouse_returns, 0)
+        metrics['inhouse_return_t_stat'] = t_stat_ih
+        metrics['inhouse_return_p_value'] = p_value_ih
+        metrics['inhouse_return_significant'] = p_value_ih < 0.05
+        
+        # Test if Composer mean return is significantly different from zero
+        t_stat_comp, p_value_comp = ttest_1samp(composer_returns, 0)
+        metrics['composer_return_t_stat'] = t_stat_comp
+        metrics['composer_return_p_value'] = p_value_comp
+        metrics['composer_return_significant'] = p_value_comp < 0.05
+        
+        # Test if relative performance is significantly different from zero
+        t_stat_rel, p_value_rel = ttest_1samp(relative_returns, 0)
+        metrics['relative_return_t_stat'] = t_stat_rel
+        metrics['relative_return_p_value'] = p_value_rel
+        metrics['relative_return_significant'] = p_value_rel < 0.05
+        
+        # Test if InHouse win rate is significantly different from 50%
+        p_value_winrate_ih = binom_test(positive_returns, total_returns, 0.5)
+        metrics['inhouse_winrate_p_value'] = p_value_winrate_ih
+        metrics['inhouse_winrate_significant'] = p_value_winrate_ih < 0.05
+        
+        # Test if Composer win rate is significantly different from 50%
+        p_value_winrate_comp = binom_test(composer_positive_returns, len(composer_returns), 0.5)
+        metrics['composer_winrate_p_value'] = p_value_winrate_comp
+        metrics['composer_winrate_significant'] = p_value_winrate_comp < 0.05
+        
+        # Test if outperformance rate is significantly different from 50%
+        p_value_outperf = binom_test(outperformance_days, len(relative_returns), 0.5)
+        metrics['outperformance_p_value'] = p_value_outperf
+        metrics['outperformance_significant'] = p_value_outperf < 0.05
+        
+        # Additional performance metrics
+        metrics['inhouse_mean_return'] = inhouse_returns.mean()
+        metrics['composer_mean_return'] = composer_returns.mean()
+        metrics['relative_mean_return'] = relative_returns.mean()
+        
+        metrics['inhouse_volatility'] = inhouse_returns.std() * np.sqrt(252)
+        metrics['composer_volatility'] = composer_returns.std() * np.sqrt(252)
+        
+        # Sharpe ratios (assuming 0% risk-free rate)
+        metrics['inhouse_sharpe'] = (inhouse_returns.mean() * 252) / (inhouse_returns.std() * np.sqrt(252)) if inhouse_returns.std() > 0 else 0
+        metrics['composer_sharpe'] = (composer_returns.mean() * 252) / (composer_returns.std() * np.sqrt(252)) if composer_returns.std() > 0 else 0
+        
+        # Information Ratio
+        metrics['information_ratio'] = (relative_returns.mean() * 252) / (relative_returns.std() * np.sqrt(252)) if relative_returns.std() > 0 else 0
+    
+    return metrics
 
 def main():
     st.markdown('<div class="main-header">📊 Portfolio Comparison Dashboard</div>', unsafe_allow_html=True)
     
-    # Load data
-    df = load_data()
-    if df is None:
-        st.stop()
+    # Sidebar for portfolio configuration
+    st.sidebar.header("🔧 Portfolio Configuration")
     
-    # Sidebar filters
-    st.sidebar.header("📅 Filters")
+    # Portfolio setup
+    st.sidebar.subheader("InHouse Portfolio")
+    inhouse_input = st.sidebar.text_input("InHouse Symbols (comma-separated)", "AAPL,GOOGL,MSFT")
+    inhouse_symbols = [s.strip().upper() for s in inhouse_input.split(',') if s.strip()]
     
-    # Date range filter
-    min_date = df['Date'].min()
-    max_date = df['Date'].max()
+    st.sidebar.subheader("Composer Portfolio")
+    composer_input = st.sidebar.text_input("Composer Symbols (comma-separated)", "SPY,QQQ")
+    composer_symbols = [s.strip().upper() for s in composer_input.split(',') if s.strip()]
+    
+    # Date range
+    st.sidebar.subheader("📅 Date Range")
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=365)
+    
     date_range = st.sidebar.date_input(
         "Select Date Range",
-        value=(min_date, max_date),
-        min_value=min_date,
-        max_value=max_date
+        value=(start_date, end_date),
+        min_value=datetime(2010, 1, 1),
+        max_value=end_date
     )
     
-    # Filter data based on date range
     if len(date_range) == 2:
         start_date, end_date = date_range
-        filtered_df = df[(df['Date'] >= pd.to_datetime(start_date)) & 
-                        (df['Date'] <= pd.to_datetime(end_date))]
-    else:
-        filtered_df = df
     
-    # Rebalanced filter
-    rebalanced_filter = st.sidebar.selectbox(
-        "Rebalanced Status",
-        options=['All', 'True', 'False'],
-        index=0
-    )
+    # Load data button
+    if st.sidebar.button("🚀 Load Portfolio Data"):
+        with st.spinner("Fetching data from Yahoo Finance..."):
+            df = fetch_portfolio_data(inhouse_symbols, composer_symbols, start_date, end_date)
+            st.session_state['portfolio_data'] = df
     
-    if rebalanced_filter != 'All':
-        filtered_df = filtered_df[filtered_df['Rebalanced'] == (rebalanced_filter == 'True')]
+    # Check if data is loaded
+    if 'portfolio_data' not in st.session_state:
+        st.info("👆 Configure your portfolios in the sidebar and click 'Load Portfolio Data' to get started!")
+        st.stop()
+    
+    df = st.session_state['portfolio_data']
+    if df is None or df.empty:
+        st.error("Failed to load portfolio data. Please check your symbols and try again.")
+        st.stop()
+    
+    # Calculate statistical metrics
+    metrics = calculate_statistical_metrics(df)
     
     # Display key metrics
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        avg_match_score = filtered_df['Match_Score'].mean()
         st.metric(
-            label="📈 Average Match Score",
-            value=f"{avg_match_score:.4f}",
-            delta=f"{avg_match_score - df['Match_Score'].mean():.4f}"
+            label="🎯 InHouse Win Rate",
+            value=f"{metrics['inhouse_win_rate']:.1%}",
+            delta=f"{metrics['inhouse_win_rate'] - 0.5:.1%} vs 50%"
         )
     
     with col2:
-        avg_portfolio_value = filtered_df['InHouse_Portfolio_Value'].mean()
         st.metric(
-            label="💰 Average Portfolio Value",
-            value=f"${avg_portfolio_value:,.2f}",
-            delta=f"${avg_portfolio_value - df['InHouse_Portfolio_Value'].mean():,.2f}"
+            label="📈 Outperformance Rate",
+            value=f"{metrics['outperformance_rate']:.1%}",
+            delta=f"{metrics['outperformance_rate'] - 0.5:.1%} vs 50%"
         )
     
     with col3:
-        avg_asset_match = filtered_df['Asset_Selection_Match'].mean()
         st.metric(
-            label="🎯 Average Asset Selection Match",
-            value=f"{avg_asset_match:.2f}",
-            delta=f"{avg_asset_match - df['Asset_Selection_Match'].mean():.2f}"
+            label="💰 InHouse Portfolio Value",
+            value=f"${df['InHouse_Portfolio_Value'].iloc[-1]:,.2f}",
+            delta=f"${df['InHouse_Portfolio_Value'].iloc[-1] - 100000:,.2f}"
         )
     
     with col4:
-        rebalanced_count = filtered_df['Rebalanced'].sum()
         st.metric(
-            label="🔄 Rebalanced Days",
-            value=f"{rebalanced_count}",
-            delta=f"{rebalanced_count - df['Rebalanced'].sum()}"
+            label="🏆 Information Ratio",
+            value=f"{metrics['information_ratio']:.3f}",
+            delta="Higher is better"
         )
+    
+    # Statistical significance summary
+    st.markdown("## 📊 Statistical Significance Summary")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown('<div class="win-rate-box">', unsafe_allow_html=True)
+        st.markdown("### 🎯 Win Rate Analysis")
+        
+        significance_symbol_ih = "✅" if metrics['inhouse_winrate_significant'] else "❌"
+        significance_symbol_out = "✅" if metrics['outperformance_significant'] else "❌"
+        
+        st.markdown(f"""
+        **InHouse Win Rate:** {metrics['inhouse_win_rate']:.1%} 
+        - Positive days: {metrics['inhouse_positive_days']} / {metrics['total_trading_days']}
+        - Statistical significance: {significance_symbol_ih} (p-value: {metrics['inhouse_winrate_p_value']:.4f})
+        
+        **Outperformance Rate:** {metrics['outperformance_rate']:.1%}
+        - Better days: {metrics['outperformance_days']} / {len(df)-1}
+        - Statistical significance: {significance_symbol_out} (p-value: {metrics['outperformance_p_value']:.4f})
+        """)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="significance-box">', unsafe_allow_html=True)
+        st.markdown("### 📈 Return Significance")
+        
+        ih_sig_symbol = "✅" if metrics['inhouse_return_significant'] else "❌"
+        rel_sig_symbol = "✅" if metrics['relative_return_significant'] else "❌"
+        
+        st.markdown(f"""
+        **InHouse Returns vs Zero:** {ih_sig_symbol}
+        - Mean daily return: {metrics['inhouse_mean_return']:.4%}
+        - t-statistic: {metrics['inhouse_return_t_stat']:.3f}
+        - p-value: {metrics['inhouse_return_p_value']:.4f}
+        
+        **Relative Returns vs Zero:** {rel_sig_symbol}
+        - Mean relative return: {metrics['relative_mean_return']:.4%}
+        - t-statistic: {metrics['relative_return_t_stat']:.3f}
+        - p-value: {metrics['relative_return_p_value']:.4f}
+        """)
+        st.markdown('</div>', unsafe_allow_html=True)
     
     # Create tabs for different views
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📈 Time Series", "🎯 Match Analysis", "💰 Portfolio Performance", 
-        "📊 Asset Analysis", "🔍 Detailed Data"
+        "📈 Performance Comparison", "🎯 Win Rate Analysis", "📊 Statistical Tests", 
+        "💹 Risk Metrics", "🔍 Detailed Data"
     ])
     
     with tab1:
-        st.header("Time Series Analysis")
+        st.header("Portfolio Performance Comparison")
         
-        # Portfolio value over time
+        # Portfolio values over time
         fig1 = go.Figure()
         fig1.add_trace(go.Scatter(
-            x=filtered_df['Date'],
-            y=filtered_df['InHouse_Portfolio_Value'],
-            mode='lines+markers',
-            name='Portfolio Value',
-            line=dict(color='#1f77b4', width=2),
-            marker=dict(size=4)
+            x=df['Date'],
+            y=df['InHouse_Portfolio_Value'],
+            mode='lines',
+            name='InHouse Portfolio',
+            line=dict(color='#1f77b4', width=2)
+        ))
+        fig1.add_trace(go.Scatter(
+            x=df['Date'],
+            y=df['Composer_Portfolio_Value'],
+            mode='lines',
+            name='Composer Portfolio',
+            line=dict(color='#ff7f0e', width=2)
         ))
         fig1.update_layout(
-            title="Portfolio Value Over Time",
+            title="Portfolio Value Comparison Over Time",
             xaxis_title="Date",
             yaxis_title="Portfolio Value ($)",
-            height=400,
+            height=500,
             hovermode='x unified'
         )
         st.plotly_chart(fig1, use_container_width=True)
         
-        # Match scores over time
-        fig2 = make_subplots(specs=[[{"secondary_y": True}]])
-        
-        fig2.add_trace(
-            go.Scatter(
-                x=filtered_df['Date'],
-                y=filtered_df['Match_Score'],
-                mode='lines+markers',
-                name='Match Score',
-                line=dict(color='#ff7f0e', width=2),
-                marker=dict(size=4)
-            ),
-            secondary_y=False,
-        )
-        
-        fig2.add_trace(
-            go.Scatter(
-                x=filtered_df['Date'],
-                y=filtered_df['Asset_Selection_Match'],
-                mode='lines+markers',
-                name='Asset Selection Match',
-                line=dict(color='#2ca02c', width=2),
-                marker=dict(size=4)
-            ),
-            secondary_y=True,
-        )
-        
-        fig2.update_xaxes(title_text="Date")
-        fig2.update_yaxes(title_text="Match Score", secondary_y=False)
-        fig2.update_yaxes(title_text="Asset Selection Match", secondary_y=True)
+        # Relative performance
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(
+            x=df['Date'],
+            y=df['Relative_Performance'],
+            mode='lines',
+            name='InHouse - Composer',
+            line=dict(color='#2ca02c', width=2),
+            fill='tonexty'
+        ))
+        fig2.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.5)
         fig2.update_layout(
-            title="Match Scores Over Time",
-            height=400,
-            hovermode='x unified'
+            title="Relative Performance (InHouse - Composer)",
+            xaxis_title="Date",
+            yaxis_title="Relative Performance ($)",
+            height=400
         )
-        
         st.plotly_chart(fig2, use_container_width=True)
     
     with tab2:
-        st.header("Match Score Analysis")
+        st.header("Win Rate Analysis")
         
         col1, col2 = st.columns(2)
         
         with col1:
-            # Match score distribution
-            fig3 = px.histogram(
-                filtered_df,
-                x='Match_Score',
-                nbins=30,
-                title="Match Score Distribution",
-                labels={'Match_Score': 'Match Score', 'count': 'Frequency'}
+            # Win rate comparison chart
+            win_rates = [
+                metrics['inhouse_win_rate'],
+                metrics['composer_win_rate'],
+                metrics['outperformance_rate']
+            ]
+            labels = ['InHouse Win Rate', 'Composer Win Rate', 'Outperformance Rate']
+            
+            fig3 = go.Figure(data=[
+                go.Bar(x=labels, y=win_rates, 
+                       marker_color=['#1f77b4', '#ff7f0e', '#2ca02c'])
+            ])
+            fig3.add_hline(y=0.5, line_dash="dash", line_color="red", 
+                          annotation_text="50% Baseline")
+            fig3.update_layout(
+                title="Win Rates Comparison",
+                yaxis_title="Win Rate",
+                yaxis=dict(tickformat='.1%'),
+                height=400
             )
-            fig3.update_layout(height=400)
             st.plotly_chart(fig3, use_container_width=True)
         
         with col2:
-            # Asset selection match distribution
-            fig4 = px.histogram(
-                filtered_df,
-                x='Asset_Selection_Match',
-                nbins=20,
-                title="Asset Selection Match Distribution",
-                labels={'Asset_Selection_Match': 'Asset Selection Match', 'count': 'Frequency'}
+            # Rolling win rate
+            window = 30
+            df['Rolling_InHouse_WinRate'] = df['InHouse_Daily_Return'].rolling(window).apply(
+                lambda x: (x > 0).mean()
             )
-            fig4.update_layout(height=400)
-            st.plotly_chart(fig4, use_container_width=True)
-        
-        # Correlation heatmap
-        numeric_cols = ['Match_Score', 'Asset_Selection_Match', 'InHouse_Portfolio_Value', 
-                       'InHouse_Num_Assets', 'Composer_Num_Assets']
-        correlation_matrix = filtered_df[numeric_cols].corr()
-        
-        fig5 = px.imshow(
-            correlation_matrix,
-            text_auto=True,
-            aspect="auto",
-            title="Correlation Matrix",
-            color_continuous_scale='RdBu_r'
-        )
-        fig5.update_layout(height=500)
-        st.plotly_chart(fig5, use_container_width=True)
-    
-    with tab3:
-        st.header("Portfolio Performance Analysis")
-        
-        # Calculate returns
-        filtered_df['Daily_Return'] = filtered_df['InHouse_Portfolio_Value'].pct_change()
-        filtered_df['Cumulative_Return'] = (1 + filtered_df['Daily_Return']).cumprod() - 1
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Cumulative returns
-            fig6 = go.Figure()
-            fig6.add_trace(go.Scatter(
-                x=filtered_df['Date'],
-                y=filtered_df['Cumulative_Return'] * 100,
+            df['Rolling_Outperformance_Rate'] = df['Relative_Daily_Return'].rolling(window).apply(
+                lambda x: (x > 0).mean()
+            )
+            
+            fig4 = go.Figure()
+            fig4.add_trace(go.Scatter(
+                x=df['Date'],
+                y=df['Rolling_InHouse_WinRate'],
                 mode='lines',
-                name='Cumulative Return',
-                line=dict(color='#1f77b4', width=2)
+                name=f'{window}-Day InHouse Win Rate',
+                line=dict(color='#1f77b4')
             ))
-            fig6.update_layout(
-                title="Cumulative Returns (%)",
+            fig4.add_trace(go.Scatter(
+                x=df['Date'],
+                y=df['Rolling_Outperformance_Rate'],
+                mode='lines',
+                name=f'{window}-Day Outperformance Rate',
+                line=dict(color='#2ca02c')
+            ))
+            fig4.add_hline(y=0.5, line_dash="dash", line_color="red")
+            fig4.update_layout(
+                title=f"Rolling {window}-Day Win Rates",
                 xaxis_title="Date",
-                yaxis_title="Cumulative Return (%)",
+                yaxis_title="Win Rate",
+                yaxis=dict(tickformat='.1%'),
                 height=400
             )
-            st.plotly_chart(fig6, use_container_width=True)
-        
-        with col2:
-            # Daily returns distribution
-            fig7 = px.histogram(
-                filtered_df.dropna(subset=['Daily_Return']),
-                x='Daily_Return',
-                nbins=50,
-                title="Daily Returns Distribution",
-                labels={'Daily_Return': 'Daily Return', 'count': 'Frequency'}
-            )
-            fig7.update_layout(height=400)
-            st.plotly_chart(fig7, use_container_width=True)
-        
-        # Performance metrics
-        st.subheader("📊 Performance Metrics")
-        
-        perf_col1, perf_col2, perf_col3, perf_col4 = st.columns(4)
-        
-        with perf_col1:
-            total_return = filtered_df['Cumulative_Return'].iloc[-1] if not filtered_df.empty else 0
-            st.metric("Total Return", f"{total_return:.2%}")
-        
-        with perf_col2:
-            volatility = filtered_df['Daily_Return'].std() * np.sqrt(252) if not filtered_df['Daily_Return'].isna().all() else 0
-            st.metric("Annualized Volatility", f"{volatility:.2%}")
-        
-        with perf_col3:
-            max_value = filtered_df['InHouse_Portfolio_Value'].max()
-            min_value = filtered_df['InHouse_Portfolio_Value'].min()
-            max_drawdown = (min_value - max_value) / max_value
-            st.metric("Max Drawdown", f"{max_drawdown:.2%}")
-        
-        with perf_col4:
-            avg_daily_return = filtered_df['Daily_Return'].mean()
-            sharpe_ratio = avg_daily_return / filtered_df['Daily_Return'].std() * np.sqrt(252) if filtered_df['Daily_Return'].std() != 0 else 0
-            st.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
+            st.plotly_chart(fig4, use_container_width=True)
     
-    with tab4:
-        st.header("Asset Analysis")
+    with tab3:
+        st.header("Statistical Significance Tests")
         
-        # Number of assets over time
-        fig8 = go.Figure()
-        fig8.add_trace(go.Scatter(
-            x=filtered_df['Date'],
-            y=filtered_df['InHouse_Num_Assets'],
-            mode='lines+markers',
-            name='InHouse Assets',
-            line=dict(color='#1f77b4', width=2)
-        ))
-        fig8.add_trace(go.Scatter(
-            x=filtered_df['Date'],
-            y=filtered_df['Composer_Num_Assets'],
-            mode='lines+markers',
-            name='Composer Assets',
-            line=dict(color='#ff7f0e', width=2)
-        ))
-        fig8.update_layout(
-            title="Number of Assets Over Time",
-            xaxis_title="Date",
-            yaxis_title="Number of Assets",
+        # Create significance results table
+        significance_data = [
+            {
+                'Test': 'InHouse Returns vs Zero',
+                'Statistic': f"{metrics['inhouse_return_t_stat']:.3f}",
+                'P-Value': f"{metrics['inhouse_return_p_value']:.4f}",
+                'Significant (α=0.05)': '✅ Yes' if metrics['inhouse_return_significant'] else '❌ No',
+                'Interpretation': 'Returns significantly different from zero' if metrics['inhouse_return_significant'] else 'Returns not significantly different from zero'
+            },
+            {
+                'Test': 'Composer Returns vs Zero',
+                'Statistic': f"{metrics['composer_return_t_stat']:.3f}",
+                'P-Value': f"{metrics['composer_return_p_value']:.4f}",
+                'Significant (α=0.05)': '✅ Yes' if metrics['composer_return_significant'] else '❌ No',
+                'Interpretation': 'Returns significantly different from zero' if metrics['composer_return_significant'] else 'Returns not significantly different from zero'
+            },
+            {
+                'Test': 'Relative Returns vs Zero',
+                'Statistic': f"{metrics['relative_return_t_stat']:.3f}",
+                'P-Value': f"{metrics['relative_return_p_value']:.4f}",
+                'Significant (α=0.05)': '✅ Yes' if metrics['relative_return_significant'] else '❌ No',
+                'Interpretation': 'Significant outperformance' if metrics['relative_return_significant'] and metrics['relative_mean_return'] > 0 else 'No significant outperformance'
+            },
+            {
+                'Test': 'InHouse Win Rate vs 50%',
+                'Statistic': 'Binomial Test',
+                'P-Value': f"{metrics['inhouse_winrate_p_value']:.4f}",
+                'Significant (α=0.05)': '✅ Yes' if metrics['inhouse_winrate_significant'] else '❌ No',
+                'Interpretation': 'Win rate significantly different from 50%' if metrics['inhouse_winrate_significant'] else 'Win rate not significantly different from 50%'
+            },
+            {
+                'Test': 'Outperformance Rate vs 50%',
+                'Statistic': 'Binomial Test',
+                'P-Value': f"{metrics['outperformance_p_value']:.4f}",
+                'Significant (α=0.05)': '✅ Yes' if metrics['outperformance_significant'] else '❌ No',
+                'Interpretation': 'Outperformance rate significantly different from 50%' if metrics['outperformance_significant'] else 'Outperformance rate not significantly different from 50%'
+            }
+        ]
+        
+        significance_df = pd.DataFrame(significance_data)
+        st.dataframe(significance_df, use_container_width=True)
+        
+        # P-value visualization
+        p_values = [
+            metrics['inhouse_return_p_value'],
+            metrics['composer_return_p_value'], 
+            metrics['relative_return_p_value'],
+            metrics['inhouse_winrate_p_value'],
+            metrics['outperformance_p_value']
+        ]
+        test_names = [
+            'InHouse\nReturns', 'Composer\nReturns', 'Relative\nReturns',
+            'InHouse\nWin Rate', 'Outperformance\nRate'
+        ]
+        
+        fig5 = go.Figure(data=[
+            go.Bar(x=test_names, y=p_values, 
+                   marker_color=['red' if p < 0.05 else 'blue' for p in p_values])
+        ])
+        fig5.add_hline(y=0.05, line_dash="dash", line_color="red", 
+                      annotation_text="α = 0.05 significance level")
+        fig5.update_layout(
+            title="P-Values for Statistical Tests",
+            yaxis_title="P-Value",
             height=400
         )
-        st.plotly_chart(fig8, use_container_width=True)
+        st.plotly_chart(fig5, use_container_width=True)
+    
+    with tab4:
+        st.header("Risk and Performance Metrics")
         
-        # Asset count distributions
         col1, col2 = st.columns(2)
         
         with col1:
-            fig9 = px.box(
-                filtered_df,
-                y='InHouse_Num_Assets',
-                title="InHouse Assets Distribution"
-            )
-            fig9.update_layout(height=400)
-            st.plotly_chart(fig9, use_container_width=True)
+            st.subheader("📊 Performance Metrics")
+            perf_metrics = pd.DataFrame({
+                'Metric': [
+                    'Mean Daily Return',
+                    'Annualized Return',
+                    'Volatility (Annualized)',
+                    'Sharpe Ratio',
+                    'Win Rate'
+                ],
+                'InHouse': [
+                    f"{metrics['inhouse_mean_return']:.4%}",
+                    f"{metrics['inhouse_mean_return'] * 252:.2%}",
+                    f"{metrics['inhouse_volatility']:.2%}",
+                    f"{metrics['inhouse_sharpe']:.3f}",
+                    f"{metrics['inhouse_win_rate']:.1%}"
+                ],
+                'Composer': [
+                    f"{metrics['composer_mean_return']:.4%}",
+                    f"{metrics['composer_mean_return'] * 252:.2%}",
+                    f"{metrics['composer_volatility']:.2%}",
+                    f"{metrics['composer_sharpe']:.3f}",
+                    f"{metrics['composer_win_rate']:.1%}"
+                ]
+            })
+            st.dataframe(perf_metrics, use_container_width=True)
         
         with col2:
-            fig10 = px.box(
-                filtered_df,
-                y='Composer_Num_Assets',
-                title="Composer Assets Distribution"
-            )
-            fig10.update_layout(height=400)
-            st.plotly_chart(fig10, use_container_width=True)
+            st.subheader("📈 Relative Performance")
+            relative_metrics = pd.DataFrame({
+                'Metric': [
+                    'Mean Relative Return',
+                    'Annualized Relative Return',
+                    'Information Ratio',
+                    'Outperformance Rate',
+                    'Best Relative Day',
+                    'Worst Relative Day'
+                ],
+                'Value': [
+                    f"{metrics['relative_mean_return']:.4%}",
+                    f"{metrics['relative_mean_return'] * 252:.2%}",
+                    f"{metrics['information_ratio']:.3f}",
+                    f"{metrics['outperformance_rate']:.1%}",
+                    f"{df['Relative_Daily_Return'].max():.2%}",
+                    f"{df['Relative_Daily_Return'].min():.2%}"
+                ]
+            })
+            st.dataframe(relative_metrics, use_container_width=True)
+        
+        # Return distributions
+        fig6 = make_subplots(rows=1, cols=2, subplot_titles=('InHouse Returns', 'Relative Returns'))
+        
+        fig6.add_trace(
+            go.Histogram(x=df['InHouse_Daily_Return'].dropna(), name='InHouse', 
+                        marker_color='#1f77b4', opacity=0.7),
+            row=1, col=1
+        )
+        
+        fig6.add_trace(
+            go.Histogram(x=df['Relative_Daily_Return'].dropna(), name='Relative', 
+                        marker_color='#2ca02c', opacity=0.7),
+            row=1, col=2
+        )
+        
+        fig6.update_layout(title="Return Distributions", height=400)
+        st.plotly_chart(fig6, use_container_width=True)
     
     with tab5:
-        st.header("Detailed Data View")
+        st.header("Detailed Portfolio Data")
         
-        # Search and filter options
-        st.subheader("🔍 Search and Filter")
+        # Display configuration
+        st.subheader("📋 Current Configuration")
+        config_col1, config_col2 = st.columns(2)
         
-        search_col1, search_col2 = st.columns(2)
+        with config_col1:
+            st.write("**InHouse Portfolio:**", ', '.join(inhouse_symbols))
+            st.write("**Date Range:**", f"{start_date} to {end_date}")
         
-        with search_col1:
-            search_assets = st.text_input("Search Assets (InHouse or Composer)", "")
+        with config_col2:
+            st.write("**Composer Portfolio:**", ', '.join(composer_symbols))
+            st.write("**Total Trading Days:**", len(df))
         
-        with search_col2:
-            sort_column = st.selectbox(
-                "Sort by",
-                options=['Date', 'Match_Score', 'InHouse_Portfolio_Value', 'Asset_Selection_Match'],
-                index=0
-            )
+        # Data table
+        st.subheader("📊 Portfolio Data")
+        display_columns = [
+            'Date', 'InHouse_Portfolio_Value', 'Composer_Portfolio_Value',
+            'Relative_Performance', 'InHouse_Daily_Return', 'Composer_Daily_Return',
+            'Relative_Daily_Return', 'Outperformance_Days'
+        ]
         
-        # Apply search filter
-        display_df = filtered_df.copy()
-        if search_assets:
-            mask = (display_df['InHouse_Assets'].str.contains(search_assets, case=False, na=False) |
-                   display_df['Composer_Assets'].str.contains(search_assets, case=False, na=False))
-            display_df = display_df[mask]
-        
-        # Sort data
-        display_df = display_df.sort_values(sort_column, ascending=False)
-        
-        # Display options
-        show_all = st.checkbox("Show all columns", value=False)
-        
-        if show_all:
-            st.dataframe(display_df, use_container_width=True, height=500)
-        else:
-            # Show selected columns
-            key_columns = [
-                'Date', 'InHouse_Assets', 'Composer_Assets', 'Common_Assets',
-                'Asset_Selection_Match', 'Match_Score', 'InHouse_Portfolio_Value',
-                'Rebalanced', 'InHouse_Num_Assets', 'Composer_Num_Assets'
-            ]
-            st.dataframe(display_df[key_columns], use_container_width=True, height=500)
-        
-        # Summary statistics
-        st.subheader("📈 Summary Statistics")
-        st.dataframe(filtered_df.describe(), use_container_width=True)
-        
-        # Download filtered data
-        csv = display_df.to_csv(index=False)
-        st.download_button(
-            label="📥 Download Filtered Data as CSV",
-            data=csv,
-            file_name=f"portfolio_comparison_filtered_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
-
-    # Footer
-    st.markdown("---")
-    st.markdown(
-        "📊 **Portfolio Comparison Dashboard** | "
-        f"Data Period: {df['Date'].min().strftime('%Y-%m-%d')} to {df['Date'].max().strftime('%Y-%m-%d')} | "
-        f"Total Records: {len(df)}"
-    )
-
-if __name__ == "__main__":
-    main()
+        display_df = df[display_columns].copy()
+        display_df['InHouse_Daily_Return
