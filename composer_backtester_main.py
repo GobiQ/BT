@@ -249,7 +249,8 @@ def run_atm_call(trips, S, iv, rf, dte, slippage, commission, contract_mult):
         trades.append(Trade(d_in, d_out, entry_price, exit_price, pnl, pnl_pct, f"K={K}, DTE={dte}"))
     return trades
 
-def run_call_debit_spread(trips, S, iv, rf, dte, target_delta, spread_pct, slippage, commission, contract_mult):
+def run_otm_call(trips, S, iv, rf, dte, otm_pct, slippage, commission, contract_mult):
+    """Run slightly OTM call strategy - lower cost, higher leverage"""
     trades = []
     for (d_in, d_out) in trips:
         if d_in not in S.index or d_out not in S.index:
@@ -258,34 +259,22 @@ def run_call_debit_spread(trips, S, iv, rf, dte, target_delta, spread_pct, slipp
         T_in = annualize_days(dte)
         r_in = float(rf.loc[d_in])
         sig_in = float(iv.loc[d_in])
-
-        try:
-            K_long = strike_for_target_call_delta(S_in, T_in, r_in, sig_in, target_delta)
-        except Exception:
-            K_long = S_in
-        K_long = nearest_strike(K_long)
-        K_short = max(K_long + 1.0, nearest_strike(S_in * (1 + spread_pct)))
-
-        call_long_in = black_scholes_call_price(S_in, K_long, T_in, r_in, sig_in)
-        call_short_in = black_scholes_call_price(S_in, K_short, T_in, r_in, sig_in)
-        net_debit_in = (call_long_in - call_short_in)
+        
+        # OTM strike (e.g., 2-5% above current price)
+        K = nearest_strike(S_in * (1 + otm_pct))
+        entry_price = black_scholes_call_price(S_in, K, T_in, r_in, sig_in)
 
         days_elapsed = max((d_out - d_in).days, 0)
         T_out = annualize_days(max(dte - days_elapsed, 0))
         r_out = float(rf.loc[d_out])
         sig_out = float(iv.loc[d_out])
-        call_long_out = black_scholes_call_price(S_out, K_long, T_out, r_out, sig_out)
-        call_short_out = black_scholes_call_price(S_out, K_short, T_out, r_out, sig_out)
-        net_value_out = (call_long_out - call_short_out)
+        exit_price = black_scholes_call_price(S_out, K, T_out, r_out, sig_out)
 
-        pnl = (net_value_out - net_debit_in) * contract_mult - 4*(slippage + commission)
-        pnl_pct = (net_value_out - net_debit_in) / max(net_debit_in, 1e-9)
+        pnl = (exit_price - entry_price) * contract_mult - 2*(slippage + commission)
+        pnl_pct = (exit_price - entry_price) / max(entry_price, 1e-9)
 
-        note = f"K_long={K_long}, K_short={K_short}, DTE={dte}"
-        trades.append(Trade(d_in, d_out, net_debit_in, net_value_out, pnl, pnl_pct, note))
+        trades.append(Trade(d_in, d_out, entry_price, exit_price, pnl, pnl_pct, f"K={K}, OTM={otm_pct:.1%}, DTE={dte}"))
     return trades
-
-# Similar implementations for other strategies would go here...
 
 # ----------------------------
 # Streamlit App
