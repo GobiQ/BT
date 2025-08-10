@@ -1,806 +1,473 @@
+"""
+Tech-Rising Signal Options Backtest - Streamlit App
+--------------------------------------------------
+Interactive web app for backtesting options strategies on the Tech-Rising signal.
+
+Run with: streamlit run streamlit_options_backtest.py
+"""
+
+import math
 import streamlit as st
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+import numpy as np
 import pandas as pd
+import yfinance as yf
+import warnings
+import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-import numpy as np
-import yfinance as yf
-from datetime import datetime, timedelta
-import warnings
-import math
-warnings.filterwarnings('ignore')
 
-# Try to import scipy, fallback to basic implementations if not available
-try:
-    from scipy import stats
-    from scipy.stats import ttest_1samp, binom_test
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
-    st.warning("⚠️ scipy not available. Using basic statistical implementations.")
+# Suppress warnings
+warnings.filterwarnings("ignore")
 
-def basic_t_test(data, mu=0):
-    """Basic t-test implementation when scipy is not available"""
-    n = len(data)
-    if n <= 1:
-        return 0, 1
-    
-    mean_data = np.mean(data)
-    std_data = np.std(data, ddof=1)
-    
-    if std_data == 0:
-        return float('inf') if mean_data != mu else 0, 1
-    
-    t_stat = (mean_data - mu) / (std_data / math.sqrt(n))
-    
-    # Approximate p-value using normal distribution for large samples
-    if n >= 30:
-        p_value = 2 * (1 - 0.5 * (1 + math.erf(abs(t_stat) / math.sqrt(2))))
-    else:
-        # Very rough approximation for small samples
-        p_value = 2 * (1 - 0.5 * (1 + math.erf(abs(t_stat) / math.sqrt(2))))
-    
-    return t_stat, p_value
-
-def basic_binom_test(successes, trials, p=0.5):
-    """Basic binomial test implementation when scipy is not available"""
-    if trials == 0:
-        return 1.0
-    
-    observed_rate = successes / trials
-    expected_rate = p
-    
-    # Use normal approximation for large samples
-    if trials >= 30:
-        std_error = math.sqrt(p * (1 - p) / trials)
-        z_score = (observed_rate - expected_rate) / std_error
-        # Approximate p-value
-        p_value = 2 * (1 - 0.5 * (1 + math.erf(abs(z_score) / math.sqrt(2))))
-    else:
-        # For small samples, use a simple approximation
-        p_value = 2 * min(observed_rate, 1 - observed_rate) if observed_rate != 0.5 else 1.0
-    
-    return p_value
-
-# Page configuration
+# Page config
 st.set_page_config(
-    page_title="Portfolio Comparison Dashboard",
-    page_icon="📊",
+    page_title="Tech-Rising Options Backtest",
+    page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .metric-container {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin: 0.5rem 0;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 2px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        padding-left: 12px;
-        padding-right: 12px;
-    }
-    .significance-box {
-        background-color: #e8f4fd;
-        border-left: 4px solid #1f77b4;
-        padding: 1rem;
-        margin: 1rem 0;
-        border-radius: 0.25rem;
-    }
-    .win-rate-box {
-        background-color: #e8f5e8;
-        border-left: 4px solid #2ca02c;
-        padding: 1rem;
-        margin: 1rem 0;
-        border-radius: 0.25rem;
-    }
-</style>
-""", unsafe_allow_html=True)
+# ----------------------------
+# Helper Functions (same as original)
+# ----------------------------
+
+def wilder_rsi(close: pd.Series, length: int) -> pd.Series:
+    """Wilder's RSI implementation on daily closes."""
+    delta = close.diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+
+    roll_up = up.ewm(alpha=1/length, adjust=False).mean()
+    roll_down = down.ewm(alpha=1/length, adjust=False).mean()
+
+    rs = roll_up / roll_down.replace({0: np.nan})
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50)
 
 @st.cache_data
-def fetch_portfolio_data(inhouse_symbols, composer_symbols, start_date, end_date, inhouse_weights=None, composer_weights=None):
-    """Fetch portfolio data from yfinance and calculate comparison metrics"""
-    try:
-        # Default equal weights if not provided
-        if inhouse_weights is None:
-            inhouse_weights = [1/len(inhouse_symbols)] * len(inhouse_symbols)
-        if composer_weights is None:
-            composer_weights = [1/len(composer_symbols)] * len(composer_symbols)
-        
-        # Fetch price data
-        all_symbols = list(set(inhouse_symbols + composer_symbols))
-        data = yf.download(all_symbols, start=start_date, end=end_date)['Adj Close']
-        
-        if len(all_symbols) == 1:
-            data = data.to_frame(all_symbols[0])
-        
-        # Calculate portfolio values
-        inhouse_portfolio = pd.Series(0, index=data.index)
-        composer_portfolio = pd.Series(0, index=data.index)
-        
-        # InHouse portfolio
-        for symbol, weight in zip(inhouse_symbols, inhouse_weights):
-            if symbol in data.columns:
-                inhouse_portfolio += data[symbol] * weight
-        
-        # Composer portfolio
-        for symbol, weight in zip(composer_symbols, composer_weights):
-            if symbol in data.columns:
-                composer_portfolio += data[symbol] * weight
-        
-        # Normalize to start at 100,000
-        initial_value = 100000
-        inhouse_portfolio = (inhouse_portfolio / inhouse_portfolio.iloc[0]) * initial_value
-        composer_portfolio = (composer_portfolio / composer_portfolio.iloc[0]) * initial_value
-        
-        # Create comparison dataframe
-        df = pd.DataFrame({
-            'Date': data.index,
-            'InHouse_Portfolio_Value': inhouse_portfolio.values,
-            'Composer_Portfolio_Value': composer_portfolio.values,
-            'InHouse_Assets': ','.join(inhouse_symbols),
-            'Composer_Assets': ','.join(composer_symbols),
-            'Common_Assets': ','.join(set(inhouse_symbols) & set(composer_symbols)),
-            'InHouse_Num_Assets': len(inhouse_symbols),
-            'Composer_Num_Assets': len(composer_symbols)
-        })
-        
-        # Calculate asset selection match (Jaccard similarity)
-        inhouse_set = set(inhouse_symbols)
-        composer_set = set(composer_symbols)
-        intersection = len(inhouse_set & composer_set)
-        union = len(inhouse_set | composer_set)
-        asset_selection_match = intersection / union if union > 0 else 0
-        df['Asset_Selection_Match'] = asset_selection_match
-        
-        # Calculate allocation differences and match scores
-        allocation_diffs = []
-        match_scores = []
-        
-        for _, row in df.iterrows():
-            # Simple allocation difference calculation
-            # For now, assume equal weight difference
-            if len(inhouse_symbols) == len(composer_symbols) and set(inhouse_symbols) == set(composer_symbols):
-                # Same assets, calculate weight differences
-                weight_diff = sum(abs(w1 - w2) for w1, w2 in zip(inhouse_weights, composer_weights))
-                allocation_diffs.append(weight_diff)
-                match_scores.append(1 - weight_diff)  # Higher score for lower differences
-            else:
-                # Different assets
-                allocation_diffs.append(1.0)  # Max difference
-                match_scores.append(asset_selection_match * 0.5)  # Penalize for different assets
-        
-        df['Allocation_Difference'] = allocation_diffs
-        df['Match_Score'] = match_scores
-        df['Rebalanced'] = True  # Assume daily rebalancing for simplicity
-        
-        # Calculate relative performance
-        df['Relative_Performance'] = df['InHouse_Portfolio_Value'] - df['Composer_Portfolio_Value']
-        df['Outperformance_Days'] = df['Relative_Performance'] > 0
-        
-        return df
-        
-    except Exception as e:
-        st.error(f"Error fetching data: {e}")
-        return None
+def fetch_prices(tickers: List[str], start: str, end: Optional[str]) -> pd.DataFrame:
+    """Cached function to fetch price data."""
+    df = yf.download(tickers, start=start, end=end, auto_adjust=True, progress=False)["Close"]
+    if isinstance(df, pd.Series):
+        df = df.to_frame()
+    df.index = pd.to_datetime(df.index)
+    return df
 
-def calculate_statistical_metrics(df):
-    """Calculate comprehensive statistical metrics including win rates and significance tests"""
-    metrics = {}
-    
-    # Calculate daily returns for both portfolios
-    df['InHouse_Daily_Return'] = df['InHouse_Portfolio_Value'].pct_change()
-    df['Composer_Daily_Return'] = df['Composer_Portfolio_Value'].pct_change()
-    df['Relative_Daily_Return'] = df['InHouse_Daily_Return'] - df['Composer_Daily_Return']
-    
-    inhouse_returns = df['InHouse_Daily_Return'].dropna()
-    composer_returns = df['Composer_Daily_Return'].dropna()
-    relative_returns = df['Relative_Daily_Return'].dropna()
-    
-    # Win Rate Analysis - InHouse Portfolio
-    positive_returns = (inhouse_returns > 0).sum()
-    total_returns = len(inhouse_returns)
-    win_rate = positive_returns / total_returns if total_returns > 0 else 0
-    
-    metrics['inhouse_win_rate'] = win_rate
-    metrics['inhouse_positive_days'] = positive_returns
-    metrics['inhouse_negative_days'] = total_returns - positive_returns
-    metrics['total_trading_days'] = total_returns
-    
-    # Win Rate Analysis - Composer Portfolio
-    composer_positive_returns = (composer_returns > 0).sum()
-    composer_win_rate = composer_positive_returns / len(composer_returns) if len(composer_returns) > 0 else 0
-    
-    metrics['composer_win_rate'] = composer_win_rate
-    metrics['composer_positive_days'] = composer_positive_returns
-    metrics['composer_negative_days'] = len(composer_returns) - composer_positive_returns
-    
-    # Outperformance Analysis
-    outperformance_days = (relative_returns > 0).sum()
-    outperformance_rate = outperformance_days / len(relative_returns) if len(relative_returns) > 0 else 0
-    
-    metrics['outperformance_rate'] = outperformance_rate
-    metrics['outperformance_days'] = outperformance_days
-    metrics['underperformance_days'] = len(relative_returns) - outperformance_days
-    
-    # Statistical Significance Tests
-    if len(inhouse_returns) > 1 and len(composer_returns) > 1:
-        # Test if InHouse mean return is significantly different from zero
-        if SCIPY_AVAILABLE:
-            t_stat_ih, p_value_ih = ttest_1samp(inhouse_returns, 0)
+def black_scholes_call_price(S, K, T, r, sigma):
+    if T <= 0:
+        return max(S - K, 0.0)
+    if sigma <= 0:
+        return max(S - K, 0.0)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    from math import erf, sqrt, exp
+    N = lambda x: 0.5 * (1.0 + erf(x / sqrt(2.0)))
+    call = S * N(d1) - K * math.exp(-r * T) * N(d2)
+    return call
+
+def black_scholes_put_price(S, K, T, r, sigma):
+    if T <= 0:
+        return max(K - S, 0.0)
+    if sigma <= 0:
+        return max(K - S, 0.0)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    from math import erf, sqrt, exp
+    N = lambda x: 0.5 * (1.0 + erf(x / sqrt(2.0)))
+    put = K * math.exp(-r * T) * N(-d2) - S * N(-d1)
+    return put
+
+def bs_call_delta(S, K, T, r, sigma):
+    if T <= 0 or sigma <= 0:
+        return 1.0 if S > K else 0.0
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    from math import erf, sqrt
+    N = lambda x: 0.5 * (1.0 + erf(x / sqrt(2.0)))
+    return N(d1)
+
+def bs_put_delta(S, K, T, r, sigma):
+    return bs_call_delta(S, K, T, r, sigma) - 1.0
+
+def strike_for_target_call_delta(S, T, r, sigma, target_delta, tol=1e-4, max_iter=60):
+    K_low = S * 0.3
+    K_high = S * 1.7
+    for _ in range(max_iter):
+        K_mid = 0.5 * (K_low + K_high)
+        delta = bs_call_delta(S, K_mid, T, r, sigma)
+        if delta > target_delta:
+            K_low, K_high = K_low, K_mid
         else:
-            t_stat_ih, p_value_ih = basic_t_test(inhouse_returns, 0)
-        
-        metrics['inhouse_return_t_stat'] = t_stat_ih
-        metrics['inhouse_return_p_value'] = p_value_ih
-        metrics['inhouse_return_significant'] = p_value_ih < 0.05
-        
-        # Test if Composer mean return is significantly different from zero
-        if SCIPY_AVAILABLE:
-            t_stat_comp, p_value_comp = ttest_1samp(composer_returns, 0)
+            K_low, K_high = K_mid, K_high
+        if abs(delta - target_delta) < tol:
+            return K_mid
+    return K_mid
+
+def strike_for_target_put_delta(S, T, r, sigma, target_put_delta, tol=1e-4, max_iter=60):
+    K_low = S * 0.3
+    K_high = S * 1.7
+    for _ in range(max_iter):
+        K_mid = 0.5 * (K_low + K_high)
+        delta = bs_put_delta(S, K_mid, T, r, sigma)
+        if delta < target_put_delta:
+            K_low, K_high = K_mid, K_high
         else:
-            t_stat_comp, p_value_comp = basic_t_test(composer_returns, 0)
-        
-        metrics['composer_return_t_stat'] = t_stat_comp
-        metrics['composer_return_p_value'] = p_value_comp
-        metrics['composer_return_significant'] = p_value_comp < 0.05
-        
-        # Test if relative performance is significantly different from zero
-        if SCIPY_AVAILABLE:
-            t_stat_rel, p_value_rel = ttest_1samp(relative_returns, 0)
-        else:
-            t_stat_rel, p_value_rel = basic_t_test(relative_returns, 0)
-        
-        metrics['relative_return_t_stat'] = t_stat_rel
-        metrics['relative_return_p_value'] = p_value_rel
-        metrics['relative_return_significant'] = p_value_rel < 0.05
-        
-        # Test if InHouse win rate is significantly different from 50%
-        if SCIPY_AVAILABLE:
-            p_value_winrate_ih = binom_test(positive_returns, total_returns, 0.5)
-        else:
-            p_value_winrate_ih = basic_binom_test(positive_returns, total_returns, 0.5)
-        
-        metrics['inhouse_winrate_p_value'] = p_value_winrate_ih
-        metrics['inhouse_winrate_significant'] = p_value_winrate_ih < 0.05
-        
-        # Test if Composer win rate is significantly different from 50%
-        if SCIPY_AVAILABLE:
-            p_value_winrate_comp = binom_test(composer_positive_returns, len(composer_returns), 0.5)
-        else:
-            p_value_winrate_comp = basic_binom_test(composer_positive_returns, len(composer_returns), 0.5)
-        
-        metrics['composer_winrate_p_value'] = p_value_winrate_comp
-        metrics['composer_winrate_significant'] = p_value_winrate_comp < 0.05
-        
-        # Test if outperformance rate is significantly different from 50%
-        if SCIPY_AVAILABLE:
-            p_value_outperf = binom_test(outperformance_days, len(relative_returns), 0.5)
-        else:
-            p_value_outperf = basic_binom_test(outperformance_days, len(relative_returns), 0.5)
-        
-        metrics['outperformance_p_value'] = p_value_outperf
-        metrics['outperformance_significant'] = p_value_outperf < 0.05
-        
-        # Additional performance metrics
-        metrics['inhouse_mean_return'] = inhouse_returns.mean()
-        metrics['composer_mean_return'] = composer_returns.mean()
-        metrics['relative_mean_return'] = relative_returns.mean()
-        
-        metrics['inhouse_volatility'] = inhouse_returns.std() * np.sqrt(252)
-        metrics['composer_volatility'] = composer_returns.std() * np.sqrt(252)
-        
-        # Sharpe ratios (assuming 0% risk-free rate)
-        metrics['inhouse_sharpe'] = (inhouse_returns.mean() * 252) / (inhouse_returns.std() * np.sqrt(252)) if inhouse_returns.std() > 0 else 0
-        metrics['composer_sharpe'] = (composer_returns.mean() * 252) / (composer_returns.std() * np.sqrt(252)) if composer_returns.std() > 0 else 0
-        
-        # Information Ratio
-        metrics['information_ratio'] = (relative_returns.mean() * 252) / (relative_returns.std() * np.sqrt(252)) if relative_returns.std() > 0 else 0
+            K_low, K_high = K_low, K_mid
+        if abs(delta - target_put_delta) < tol:
+            return K_mid
+    return K_mid
+
+def nearest_strike(x, step=1.0):
+    return round(x / step) * step
+
+def annualize_days(days: int) -> float:
+    return max(days, 0) / 365.0
+
+@st.cache_data
+def load_iv_proxy(target: str, start: str, end: Optional[str]) -> pd.Series:
+    idx = "^VIX" if target.upper() == "SPY" else "^VXN"
+    iv_df = yf.download(idx, start=start, end=end, auto_adjust=False, progress=False)["Close"]
+    iv = (iv_df / 100.0).reindex(iv_df.index)
+    iv.name = "iv_proxy"
+    return iv
+
+@st.cache_data
+def load_rf_proxy(start: str, end: Optional[str]) -> pd.Series:
+    rf_df = yf.download("^IRX", start=start, end=end, auto_adjust=False, progress=False)["Close"]
+    rf = (rf_df / 100.0).reindex(rf_df.index)
+    rf.name = "rf_proxy"
+    return rf
+
+@dataclass
+class Trade:
+    entry_date: pd.Timestamp
+    exit_date: pd.Timestamp
+    entry_price: float
+    exit_price: float
+    pnl: float
+    pnl_pct: float
+    notes: str
+
+def build_signal(start, end, rsi_len) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    tickers = ["XLK", "KMLM", "IGIB"]
+    px = fetch_prices(tickers, start, end)
     
-    return metrics
+    rsi = {}
+    for t in tickers:
+        rsi[t] = wilder_rsi(px[t], rsi_len)
+    rsi = pd.DataFrame(rsi)
+    cond = (rsi["XLK"] > rsi["KMLM"]) & (rsi["IGIB"] > rsi["XLK"])
+    cond = cond.astype(bool)
+
+    entries = (cond & (~cond.shift(1).fillna(False)))
+    exits = (~cond & (cond.shift(1).fillna(False)))
+
+    df = pd.DataFrame({
+        "cond": cond,
+        "entry": entries,
+        "exit": exits
+    }, index=px.index)
+
+    return df, px
+
+def build_trips(signal_df: pd.DataFrame) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+    entries = list(signal_df.index[signal_df["entry"]])
+    exits   = list(signal_df.index[signal_df["exit"]])
+
+    trips = []
+    ei = xi = 0
+    active_entry = None
+    for d in signal_df.index:
+        if ei < len(entries) and d == entries[ei]:
+            active_entry = d
+            ei += 1
+        if xi < len(exits) and d == exits[xi] and active_entry is not None:
+            trips.append((active_entry, d))
+            active_entry = None
+            xi += 1
+    if active_entry is not None:
+        trips.append((active_entry, signal_df.index[-1]))
+    return trips
+
+def max_drawdown(equity_curve: np.ndarray) -> float:
+    peak = -np.inf
+    dd = 0.0
+    for x in equity_curve:
+        if x > peak:
+            peak = x
+        dd = min(dd, x - peak)
+    return dd
+
+def summarize_trades(trades: List[Trade]) -> pd.DataFrame:
+    if not trades:
+        return pd.DataFrame()
+    df = pd.DataFrame([t.__dict__ for t in trades])
+    out = {
+        "n_trades": [len(df)],
+        "hit_rate": [(df["pnl"] > 0).mean()],
+        "avg_pnl_%": [df["pnl_pct"].mean()],
+        "avg_win_%": [df.loc[df["pnl"]>0, "pnl_pct"].mean() if (df["pnl"]>0).any() else np.nan],
+        "avg_loss_%": [df.loc[df["pnl"]<=0, "pnl_pct"].mean() if (df["pnl"]<=0).any() else np.nan],
+        "profit_factor": [df.loc[df["pnl"]>0, "pnl"].sum() / abs(df.loc[df["pnl"]<=0, "pnl"].sum()) if (df["pnl"]<=0).any() else np.inf],
+        "total_pnl_$": [df["pnl"].sum()],
+        "max_drawdown_$": [max_drawdown(np.cumsum(df["pnl"]).values)],
+    }
+    return pd.DataFrame(out)
+
+def equity_curve(trades: List[Trade]) -> pd.Series:
+    if not trades:
+        return pd.Series(dtype=float)
+    df = pd.DataFrame([t.__dict__ for t in trades])
+    ec = df.groupby("exit_date")["pnl"].sum().cumsum()
+    ec.name = "equity"
+    return ec
+
+# Strategy implementations (simplified versions of original functions)
+def run_atm_call(trips, S, iv, rf, dte, slippage, commission, contract_mult):
+    trades = []
+    for (d_in, d_out) in trips:
+        if d_in not in S.index or d_out not in S.index:
+            continue
+        S_in, S_out = float(S.loc[d_in]), float(S.loc[d_out])
+        T_in = annualize_days(dte)
+        r_in = float(rf.loc[d_in])
+        sig_in = float(iv.loc[d_in])
+        
+        K = nearest_strike(S_in)
+        entry_price = black_scholes_call_price(S_in, K, T_in, r_in, sig_in)
+
+        days_elapsed = max((d_out - d_in).days, 0)
+        T_out = annualize_days(max(dte - days_elapsed, 0))
+        r_out = float(rf.loc[d_out])
+        sig_out = float(iv.loc[d_out])
+        exit_price = black_scholes_call_price(S_out, K, T_out, r_out, sig_out)
+
+        pnl = (exit_price - entry_price) * contract_mult - 2*(slippage + commission)
+        pnl_pct = (exit_price - entry_price) / max(entry_price, 1e-9)
+
+        trades.append(Trade(d_in, d_out, entry_price, exit_price, pnl, pnl_pct, f"K={K}, DTE={dte}"))
+    return trades
+
+def run_call_debit_spread(trips, S, iv, rf, dte, target_delta, spread_pct, slippage, commission, contract_mult):
+    trades = []
+    for (d_in, d_out) in trips:
+        if d_in not in S.index or d_out not in S.index:
+            continue
+        S_in, S_out = float(S.loc[d_in]), float(S.loc[d_out])
+        T_in = annualize_days(dte)
+        r_in = float(rf.loc[d_in])
+        sig_in = float(iv.loc[d_in])
+
+        try:
+            K_long = strike_for_target_call_delta(S_in, T_in, r_in, sig_in, target_delta)
+        except Exception:
+            K_long = S_in
+        K_long = nearest_strike(K_long)
+        K_short = max(K_long + 1.0, nearest_strike(S_in * (1 + spread_pct)))
+
+        call_long_in = black_scholes_call_price(S_in, K_long, T_in, r_in, sig_in)
+        call_short_in = black_scholes_call_price(S_in, K_short, T_in, r_in, sig_in)
+        net_debit_in = (call_long_in - call_short_in)
+
+        days_elapsed = max((d_out - d_in).days, 0)
+        T_out = annualize_days(max(dte - days_elapsed, 0))
+        r_out = float(rf.loc[d_out])
+        sig_out = float(iv.loc[d_out])
+        call_long_out = black_scholes_call_price(S_out, K_long, T_out, r_out, sig_out)
+        call_short_out = black_scholes_call_price(S_out, K_short, T_out, r_out, sig_out)
+        net_value_out = (call_long_out - call_short_out)
+
+        pnl = (net_value_out - net_debit_in) * contract_mult - 4*(slippage + commission)
+        pnl_pct = (net_value_out - net_debit_in) / max(net_debit_in, 1e-9)
+
+        note = f"K_long={K_long}, K_short={K_short}, DTE={dte}"
+        trades.append(Trade(d_in, d_out, net_debit_in, net_value_out, pnl, pnl_pct, note))
+    return trades
+
+# Similar implementations for other strategies would go here...
+
+# ----------------------------
+# Streamlit App
+# ----------------------------
 
 def main():
-    st.markdown('<div class="main-header">📊 Portfolio Comparison Dashboard</div>', unsafe_allow_html=True)
+    st.title("📈 Tech-Rising Options Backtest")
+    st.markdown("Interactive backtesting of options strategies on the Tech-Rising signal")
     
-    # Sidebar for portfolio configuration
-    st.sidebar.header("🔧 Portfolio Configuration")
+    # Sidebar for parameters
+    st.sidebar.header("Configuration")
     
-    # Portfolio setup
-    st.sidebar.subheader("InHouse Portfolio")
-    inhouse_input = st.sidebar.text_input("InHouse Symbols (comma-separated)", "AAPL,GOOGL,MSFT")
-    inhouse_symbols = [s.strip().upper() for s in inhouse_input.split(',') if s.strip()]
+    # Basic parameters
+    target = st.sidebar.selectbox("Target Symbol", ["SPY", "QQQ", "TQQQ"], index=0)
+    start_date = st.sidebar.date_input("Start Date", pd.to_datetime("2010-01-01"))
+    end_date = st.sidebar.date_input("End Date", pd.to_datetime("today"))
+    rsi_length = st.sidebar.slider("RSI Length", 5, 20, 10)
     
-    st.sidebar.subheader("Composer Portfolio")
-    composer_input = st.sidebar.text_input("Composer Symbols (comma-separated)", "SPY,QQQ")
-    composer_symbols = [s.strip().upper() for s in composer_input.split(',') if s.strip()]
+    # Options parameters
+    st.sidebar.subheader("Options Parameters")
+    dte_atm = st.sidebar.slider("ATM Call DTE", 7, 30, 14)
+    dte_vertical = st.sidebar.slider("Vertical Spreads DTE", 7, 30, 14)
     
-    # Date range
-    st.sidebar.subheader("📅 Date Range")
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=365)
+    # Risk parameters
+    st.sidebar.subheader("Risk Parameters")
+    delta_itm_long = st.sidebar.slider("ITM Call Delta", 0.5, 0.8, 0.6)
+    delta_short_put = st.sidebar.slider("Short Put Delta", 0.15, 0.35, 0.25)
+    spread_pct = st.sidebar.slider("Spread Width %", 0.01, 0.05, 0.03)
     
-    date_range = st.sidebar.date_input(
-        "Select Date Range",
-        value=(start_date, end_date),
-        min_value=datetime(2010, 1, 1),
-        max_value=end_date
-    )
+    # Cost parameters
+    st.sidebar.subheader("Cost Parameters")
+    slippage_per_leg = st.sidebar.number_input("Slippage per Leg ($)", 0.0, 0.10, 0.03)
+    commission_per_leg = st.sidebar.number_input("Commission per Leg ($)", 0.0, 1.0, 0.0)
+    contract_mult = st.sidebar.number_input("Contract Multiplier", 50, 200, 100)
     
-    if len(date_range) == 2:
-        start_date, end_date = date_range
+    # Strategy selection
+    st.sidebar.subheader("Strategies to Run")
+    run_atm = st.sidebar.checkbox("ATM Call", True)
+    run_debit = st.sidebar.checkbox("Call Debit Spread", True)
+    run_put_spread = st.sidebar.checkbox("Bull Put Spread", False)  # Simplified for demo
+    run_diagonal = st.sidebar.checkbox("Call Diagonal", False)    # Simplified for demo
     
-    # Load data button
-    if st.sidebar.button("🚀 Load Portfolio Data"):
-        with st.spinner("Fetching data from Yahoo Finance..."):
-            df = fetch_portfolio_data(inhouse_symbols, composer_symbols, start_date, end_date)
-            st.session_state['portfolio_data'] = df
-    
-    # Check if data is loaded
-    if 'portfolio_data' not in st.session_state:
-        st.info("👆 Configure your portfolios in the sidebar and click 'Load Portfolio Data' to get started!")
-        st.stop()
-    
-    df = st.session_state['portfolio_data']
-    if df is None or df.empty:
-        st.error("Failed to load portfolio data. Please check your symbols and try again.")
-        st.stop()
-    
-    # Calculate statistical metrics
-    metrics = calculate_statistical_metrics(df)
-    
-    # Display key metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            label="🎯 InHouse Win Rate",
-            value=f"{metrics['inhouse_win_rate']:.1%}",
-            delta=f"{metrics['inhouse_win_rate'] - 0.5:.1%} vs 50%"
-        )
-    
-    with col2:
-        st.metric(
-            label="📈 Outperformance Rate",
-            value=f"{metrics['outperformance_rate']:.1%}",
-            delta=f"{metrics['outperformance_rate'] - 0.5:.1%} vs 50%"
-        )
-    
-    with col3:
-        st.metric(
-            label="💰 InHouse Portfolio Value",
-            value=f"${df['InHouse_Portfolio_Value'].iloc[-1]:,.2f}",
-            delta=f"${df['InHouse_Portfolio_Value'].iloc[-1] - 100000:,.2f}"
-        )
-    
-    with col4:
-        st.metric(
-            label="🏆 Information Ratio",
-            value=f"{metrics['information_ratio']:.3f}",
-            delta="Higher is better"
-        )
-    
-    # Statistical significance summary
-    st.markdown("## 📊 Statistical Significance Summary")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown('<div class="win-rate-box">', unsafe_allow_html=True)
-        st.markdown("### 🎯 Win Rate Analysis")
+    if st.sidebar.button("Run Backtest", type="primary"):
+        with st.spinner("Building signal and fetching data..."):
+            # Build signal
+            sig_df, signal_px = build_signal(start_date.strftime("%Y-%m-%d"), 
+                                           end_date.strftime("%Y-%m-%d"), 
+                                           rsi_length)
+            trips = build_trips(sig_df)
+            
+            # Load target data
+            S = fetch_prices([target], start_date.strftime("%Y-%m-%d"), 
+                           end_date.strftime("%Y-%m-%d"))[target]
+            iv = load_iv_proxy(target, start_date.strftime("%Y-%m-%d"), 
+                             end_date.strftime("%Y-%m-%d"))
+            rf = load_rf_proxy(start_date.strftime("%Y-%m-%d"), 
+                             end_date.strftime("%Y-%m-%d"))
+            
+            # Align data
+            idx = sig_df.index.intersection(S.index).intersection(iv.index).intersection(rf.index)
+            S = S.reindex(idx)
+            iv = iv.reindex(idx)
+            rf = rf.reindex(idx)
+            sig_df = sig_df.reindex(idx)
+            
+        st.success(f"Found {len(trips)} risk-on episodes")
         
-        significance_symbol_ih = "✅" if metrics['inhouse_winrate_significant'] else "❌"
-        significance_symbol_out = "✅" if metrics['outperformance_significant'] else "❌"
-        
-        st.markdown(f"""
-        **InHouse Win Rate:** {metrics['inhouse_win_rate']:.1%} 
-        - Positive days: {metrics['inhouse_positive_days']} / {metrics['total_trading_days']}
-        - Statistical significance: {significance_symbol_ih} (p-value: {metrics['inhouse_winrate_p_value']:.4f})
-        
-        **Outperformance Rate:** {metrics['outperformance_rate']:.1%}
-        - Better days: {metrics['outperformance_days']} / {len(df)-1}
-        - Statistical significance: {significance_symbol_out} (p-value: {metrics['outperformance_p_value']:.4f})
-        """)
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown('<div class="significance-box">', unsafe_allow_html=True)
-        st.markdown("### 📈 Return Significance")
-        
-        ih_sig_symbol = "✅" if metrics['inhouse_return_significant'] else "❌"
-        rel_sig_symbol = "✅" if metrics['relative_return_significant'] else "❌"
-        
-        st.markdown(f"""
-        **InHouse Returns vs Zero:** {ih_sig_symbol}
-        - Mean daily return: {metrics['inhouse_mean_return']:.4%}
-        - t-statistic: {metrics['inhouse_return_t_stat']:.3f}
-        - p-value: {metrics['inhouse_return_p_value']:.4f}
-        
-        **Relative Returns vs Zero:** {rel_sig_symbol}
-        - Mean relative return: {metrics['relative_mean_return']:.4%}
-        - t-statistic: {metrics['relative_return_t_stat']:.3f}
-        - p-value: {metrics['relative_return_p_value']:.4f}
-        """)
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Create tabs for different views
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📈 Performance Comparison", "🎯 Win Rate Analysis", "📊 Statistical Tests", 
-        "💹 Risk Metrics", "🔍 Detailed Data"
-    ])
-    
-    with tab1:
-        st.header("Portfolio Performance Comparison")
-        
-        # Portfolio values over time
-        fig1 = go.Figure()
-        fig1.add_trace(go.Scatter(
-            x=df['Date'],
-            y=df['InHouse_Portfolio_Value'],
-            mode='lines',
-            name='InHouse Portfolio',
-            line=dict(color='#1f77b4', width=2)
-        ))
-        fig1.add_trace(go.Scatter(
-            x=df['Date'],
-            y=df['Composer_Portfolio_Value'],
-            mode='lines',
-            name='Composer Portfolio',
-            line=dict(color='#ff7f0e', width=2)
-        ))
-        fig1.update_layout(
-            title="Portfolio Value Comparison Over Time",
-            xaxis_title="Date",
-            yaxis_title="Portfolio Value ($)",
-            height=500,
-            hovermode='x unified'
-        )
-        st.plotly_chart(fig1, use_container_width=True)
-        
-        # Relative performance
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(
-            x=df['Date'],
-            y=df['Relative_Performance'],
-            mode='lines',
-            name='InHouse - Composer',
-            line=dict(color='#2ca02c', width=2),
-            fill='tonexty'
-        ))
-        fig2.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.5)
-        fig2.update_layout(
-            title="Relative Performance (InHouse - Composer)",
-            xaxis_title="Date",
-            yaxis_title="Relative Performance ($)",
-            height=400
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-    
-    with tab2:
-        st.header("Win Rate Analysis")
+        # Display signal chart
+        st.header("Signal Analysis")
         
         col1, col2 = st.columns(2)
         
         with col1:
-            # Win rate comparison chart
-            win_rates = [
-                metrics['inhouse_win_rate'],
-                metrics['composer_win_rate'],
-                metrics['outperformance_rate']
-            ]
-            labels = ['InHouse Win Rate', 'Composer Win Rate', 'Outperformance Rate']
+            # RSI chart
+            tickers = ["XLK", "KMLM", "IGIB"]
+            rsi_data = {}
+            for t in tickers:
+                if t in signal_px.columns:
+                    rsi_data[t] = wilder_rsi(signal_px[t], rsi_length)
+            rsi_df = pd.DataFrame(rsi_data)
             
-            fig3 = go.Figure(data=[
-                go.Bar(x=labels, y=win_rates, 
-                       marker_color=['#1f77b4', '#ff7f0e', '#2ca02c'])
-            ])
-            fig3.add_hline(y=0.5, line_dash="dash", line_color="red", 
-                          annotation_text="50% Baseline")
-            fig3.update_layout(
-                title="Win Rates Comparison",
-                yaxis_title="Win Rate",
-                yaxis=dict(tickformat='.1%'),
-                height=400
-            )
-            st.plotly_chart(fig3, use_container_width=True)
+            fig_rsi = go.Figure()
+            for col in rsi_df.columns:
+                fig_rsi.add_trace(go.Scatter(x=rsi_df.index, y=rsi_df[col], 
+                                           name=f"RSI({col})", mode='lines'))
+            fig_rsi.update_layout(title="RSI Components", xaxis_title="Date", yaxis_title="RSI")
+            st.plotly_chart(fig_rsi, use_container_width=True)
         
         with col2:
-            # Rolling win rate
-            window = 30
-            df['Rolling_InHouse_WinRate'] = df['InHouse_Daily_Return'].rolling(window).apply(
-                lambda x: (x > 0).mean()
-            )
-            df['Rolling_Outperformance_Rate'] = df['Relative_Daily_Return'].rolling(window).apply(
-                lambda x: (x > 0).mean()
-            )
+            # Signal periods
+            fig_signal = go.Figure()
+            fig_signal.add_trace(go.Scatter(x=S.index, y=S, name=target, mode='lines'))
             
-            fig4 = go.Figure()
-            fig4.add_trace(go.Scatter(
-                x=df['Date'],
-                y=df['Rolling_InHouse_WinRate'],
-                mode='lines',
-                name=f'{window}-Day InHouse Win Rate',
-                line=dict(color='#1f77b4')
-            ))
-            fig4.add_trace(go.Scatter(
-                x=df['Date'],
-                y=df['Rolling_Outperformance_Rate'],
-                mode='lines',
-                name=f'{window}-Day Outperformance Rate',
-                line=dict(color='#2ca02c')
-            ))
-            fig4.add_hline(y=0.5, line_dash="dash", line_color="red")
-            fig4.update_layout(
-                title=f"Rolling {window}-Day Win Rates",
-                xaxis_title="Date",
-                yaxis_title="Win Rate",
-                yaxis=dict(tickformat='.1%'),
-                height=400
-            )
-            st.plotly_chart(fig4, use_container_width=True)
-    
-    with tab3:
-        st.header("Statistical Significance Tests")
+            # Highlight signal periods
+            for i, (start_trip, end_trip) in enumerate(trips):
+                fig_signal.add_vrect(x0=start_trip, x1=end_trip, 
+                                   fillcolor="green", opacity=0.2, 
+                                   annotation_text=f"Signal {i+1}" if i < 5 else "",
+                                   annotation_position="top left")
+            
+            fig_signal.update_layout(title=f"{target} Price with Signal Periods", 
+                                   xaxis_title="Date", yaxis_title="Price")
+            st.plotly_chart(fig_signal, use_container_width=True)
         
-        # Create significance results table
-        significance_data = [
-            {
-                'Test': 'InHouse Returns vs Zero',
-                'Statistic': f"{metrics['inhouse_return_t_stat']:.3f}",
-                'P-Value': f"{metrics['inhouse_return_p_value']:.4f}",
-                'Significant (α=0.05)': '✅ Yes' if metrics['inhouse_return_significant'] else '❌ No',
-                'Interpretation': 'Returns significantly different from zero' if metrics['inhouse_return_significant'] else 'Returns not significantly different from zero'
-            },
-            {
-                'Test': 'Composer Returns vs Zero',
-                'Statistic': f"{metrics['composer_return_t_stat']:.3f}",
-                'P-Value': f"{metrics['composer_return_p_value']:.4f}",
-                'Significant (α=0.05)': '✅ Yes' if metrics['composer_return_significant'] else '❌ No',
-                'Interpretation': 'Returns significantly different from zero' if metrics['composer_return_significant'] else 'Returns not significantly different from zero'
-            },
-            {
-                'Test': 'Relative Returns vs Zero',
-                'Statistic': f"{metrics['relative_return_t_stat']:.3f}",
-                'P-Value': f"{metrics['relative_return_p_value']:.4f}",
-                'Significant (α=0.05)': '✅ Yes' if metrics['relative_return_significant'] else '❌ No',
-                'Interpretation': 'Significant outperformance' if metrics['relative_return_significant'] and metrics['relative_mean_return'] > 0 else 'No significant outperformance'
-            },
-            {
-                'Test': 'InHouse Win Rate vs 50%',
-                'Statistic': 'Binomial Test',
-                'P-Value': f"{metrics['inhouse_winrate_p_value']:.4f}",
-                'Significant (α=0.05)': '✅ Yes' if metrics['inhouse_winrate_significant'] else '❌ No',
-                'Interpretation': 'Win rate significantly different from 50%' if metrics['inhouse_winrate_significant'] else 'Win rate not significantly different from 50%'
-            },
-            {
-                'Test': 'Outperformance Rate vs 50%',
-                'Statistic': 'Binomial Test',
-                'P-Value': f"{metrics['outperformance_p_value']:.4f}",
-                'Significant (α=0.05)': '✅ Yes' if metrics['outperformance_significant'] else '❌ No',
-                'Interpretation': 'Outperformance rate significantly different from 50%' if metrics['outperformance_significant'] else 'Outperformance rate not significantly different from 50%'
-            }
-        ]
+        # Run strategies
+        strat_trades = {}
+        summaries = []
         
-        significance_df = pd.DataFrame(significance_data)
-        st.dataframe(significance_df, use_container_width=True)
+        with st.spinner("Running strategies..."):
+            if run_atm:
+                atm_trades = run_atm_call(trips, S, iv, rf, dte_atm, 
+                                        slippage_per_leg, commission_per_leg, contract_mult)
+                strat_trades["ATM Call"] = atm_trades
+            
+            if run_debit:
+                debit_trades = run_call_debit_spread(trips, S, iv, rf, dte_vertical, 
+                                                   delta_itm_long, spread_pct,
+                                                   slippage_per_leg, commission_per_leg, contract_mult)
+                strat_trades["Call Debit Spread"] = debit_trades
         
-        # P-value visualization
-        p_values = [
-            metrics['inhouse_return_p_value'],
-            metrics['composer_return_p_value'], 
-            metrics['relative_return_p_value'],
-            metrics['inhouse_winrate_p_value'],
-            metrics['outperformance_p_value']
-        ]
-        test_names = [
-            'InHouse\nReturns', 'Composer\nReturns', 'Relative\nReturns',
-            'InHouse\nWin Rate', 'Outperformance\nRate'
-        ]
-        
-        fig5 = go.Figure(data=[
-            go.Bar(x=test_names, y=p_values, 
-                   marker_color=['red' if p < 0.05 else 'blue' for p in p_values])
-        ])
-        fig5.add_hline(y=0.05, line_dash="dash", line_color="red", 
-                      annotation_text="α = 0.05 significance level")
-        fig5.update_layout(
-            title="P-Values for Statistical Tests",
-            yaxis_title="P-Value",
-            height=400
-        )
-        st.plotly_chart(fig5, use_container_width=True)
-    
-    with tab4:
-        st.header("Risk and Performance Metrics")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📊 Performance Metrics")
-            perf_metrics = pd.DataFrame({
-                'Metric': [
-                    'Mean Daily Return',
-                    'Annualized Return',
-                    'Volatility (Annualized)',
-                    'Sharpe Ratio',
-                    'Win Rate'
-                ],
-                'InHouse': [
-                    f"{metrics['inhouse_mean_return']:.4%}",
-                    f"{metrics['inhouse_mean_return'] * 252:.2%}",
-                    f"{metrics['inhouse_volatility']:.2%}",
-                    f"{metrics['inhouse_sharpe']:.3f}",
-                    f"{metrics['inhouse_win_rate']:.1%}"
-                ],
-                'Composer': [
-                    f"{metrics['composer_mean_return']:.4%}",
-                    f"{metrics['composer_mean_return'] * 252:.2%}",
-                    f"{metrics['composer_volatility']:.2%}",
-                    f"{metrics['composer_sharpe']:.3f}",
-                    f"{metrics['composer_win_rate']:.1%}"
-                ]
-            })
-            st.dataframe(perf_metrics, use_container_width=True)
-        
-        with col2:
-            st.subheader("📈 Relative Performance")
-            relative_metrics = pd.DataFrame({
-                'Metric': [
-                    'Mean Relative Return',
-                    'Annualized Relative Return',
-                    'Information Ratio',
-                    'Outperformance Rate',
-                    'Best Relative Day',
-                    'Worst Relative Day'
-                ],
-                'Value': [
-                    f"{metrics['relative_mean_return']:.4%}",
-                    f"{metrics['relative_mean_return'] * 252:.2%}",
-                    f"{metrics['information_ratio']:.3f}",
-                    f"{metrics['outperformance_rate']:.1%}",
-                    f"{df['Relative_Daily_Return'].max():.2%}",
-                    f"{df['Relative_Daily_Return'].min():.2%}"
-                ]
-            })
-            st.dataframe(relative_metrics, use_container_width=True)
-        
-        # Return distributions
-        fig6 = make_subplots(rows=1, cols=2, subplot_titles=('InHouse Returns', 'Relative Returns'))
-        
-        fig6.add_trace(
-            go.Histogram(x=df['InHouse_Daily_Return'].dropna(), name='InHouse', 
-                        marker_color='#1f77b4', opacity=0.7),
-            row=1, col=1
-        )
-        
-        fig6.add_trace(
-            go.Histogram(x=df['Relative_Daily_Return'].dropna(), name='Relative', 
-                        marker_color='#2ca02c', opacity=0.7),
-            row=1, col=2
-        )
-        
-        fig6.update_layout(title="Return Distributions", height=400)
-        st.plotly_chart(fig6, use_container_width=True)
-    
-    with tab5:
-        st.header("Detailed Portfolio Data")
-        
-        # Display configuration
-        st.subheader("📋 Current Configuration")
-        config_col1, config_col2 = st.columns(2)
-        
-        with config_col1:
-            st.write("**InHouse Portfolio:**", ', '.join(inhouse_symbols))
-            st.write("**Date Range:**", f"{start_date} to {end_date}")
-        
-        with config_col2:
-            st.write("**Composer Portfolio:**", ', '.join(composer_symbols))
-            st.write("**Total Trading Days:**", len(df))
-        
-        # Data table
-        st.subheader("📊 Portfolio Data")
-        display_columns = [
-            'Date', 'InHouse_Portfolio_Value', 'Composer_Portfolio_Value',
-            'Relative_Performance', 'InHouse_Daily_Return', 'Composer_Daily_Return',
-            'Relative_Daily_Return', 'Outperformance_Days'
-        ]
-        
-        display_df = df[display_columns].copy()
-        display_df['InHouse_Daily_Return'] = display_df['InHouse_Daily_Return'].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
-        display_df['Composer_Daily_Return'] = display_df['Composer_Daily_Return'].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
-        display_df['Relative_Daily_Return'] = display_df['Relative_Daily_Return'].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
-        
-        st.dataframe(display_df, use_container_width=True, height=400)
-        
-        # Summary statistics
-        st.subheader("📈 Summary Statistics")
-        summary_stats = df[['InHouse_Portfolio_Value', 'Composer_Portfolio_Value', 'Relative_Performance']].describe()
-        st.dataframe(summary_stats, use_container_width=True)
-        
-        # Download data
-        csv = df.to_csv(index=False)
-        st.download_button(
-            label="📥 Download Portfolio Data as CSV",
-            data=csv,
-            file_name=f"portfolio_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
-
-    # Footer with additional insights
-    st.markdown("---")
-    st.markdown("## 🎯 Key Insights")
-    
-    insights_col1, insights_col2 = st.columns(2)
-    
-    with insights_col1:
-        st.markdown("### 📊 Performance Summary")
-        
-        if metrics['relative_mean_return'] > 0:
-            performance_text = f"✅ InHouse portfolio outperformed by {metrics['relative_mean_return']:.4%} daily on average"
-        else:
-            performance_text = f"❌ InHouse portfolio underperformed by {abs(metrics['relative_mean_return']):.4%} daily on average"
-        
-        st.markdown(f"""
-        - {performance_text}
-        - InHouse win rate: {metrics['inhouse_win_rate']:.1%}
-        - Outperformance rate: {metrics['outperformance_rate']:.1%}
-        - Information ratio: {metrics['information_ratio']:.3f}
-        """)
-    
-    with insights_col2:
-        st.markdown("### 🔬 Statistical Confidence")
-        
-        confidence_items = []
-        if metrics['relative_return_significant']:
-            if metrics['relative_mean_return'] > 0:
-                confidence_items.append("✅ Outperformance is statistically significant")
+        # Results
+        if strat_trades:
+            st.header("Backtest Results")
+            
+            # Summary table
+            for name, trades in strat_trades.items():
+                if trades:
+                    summ = summarize_trades(trades)
+                    if not summ.empty:
+                        summ.insert(0, "strategy", name)
+                        summaries.append(summ)
+            
+            if summaries:
+                all_summ = pd.concat(summaries, ignore_index=True)
+                
+                # Format summary for display
+                display_summ = all_summ.copy()
+                for col in ["hit_rate", "avg_pnl_%", "avg_win_%", "avg_loss_%"]:
+                    if col in display_summ.columns:
+                        display_summ[col] = (display_summ[col] * 100).round(2)
+                
+                st.subheader("Performance Summary")
+                st.dataframe(display_summ, use_container_width=True)
+                
+                # Equity curves
+                st.subheader("Equity Curves")
+                fig_equity = go.Figure()
+                
+                for name, trades in strat_trades.items():
+                    if trades:
+                        ec = equity_curve(trades)
+                        if not ec.empty:
+                            fig_equity.add_trace(go.Scatter(x=ec.index, y=ec.values, 
+                                                          name=name, mode='lines'))
+                
+                fig_equity.update_layout(title="Strategy Equity Curves", 
+                                       xaxis_title="Date", yaxis_title="Cumulative P&L ($)")
+                st.plotly_chart(fig_equity, use_container_width=True)
+                
+                # Trade details
+                st.subheader("Trade Details")
+                for name, trades in strat_trades.items():
+                    if trades:
+                        with st.expander(f"{name} Trades ({len(trades)} total)"):
+                            trades_df = pd.DataFrame([t.__dict__ for t in trades])
+                            trades_df["pnl_pct"] = (trades_df["pnl_pct"] * 100).round(2)
+                            trades_df["pnl"] = trades_df["pnl"].round(2)
+                            st.dataframe(trades_df, use_container_width=True)
+                            
+                            # Download CSV
+                            csv = trades_df.to_csv(index=False)
+                            st.download_button(
+                                label=f"Download {name} trades CSV",
+                                data=csv,
+                                file_name=f"{name.replace(' ', '_')}_trades_{target}.csv",
+                                mime="text/csv"
+                            )
             else:
-                confidence_items.append("❌ Underperformance is statistically significant")
+                st.warning("No trades generated. Check your parameters or date range.")
         else:
-            confidence_items.append("⚠️ Performance difference is not statistically significant")
-        
-        if metrics['inhouse_winrate_significant']:
-            confidence_items.append("✅ Win rate is significantly different from 50%")
-        else:
-            confidence_items.append("⚠️ Win rate is not significantly different from 50%")
-        
-        if metrics['outperformance_significant']:
-            confidence_items.append("✅ Outperformance rate is significantly different from 50%")
-        else:
-            confidence_items.append("⚠️ Outperformance rate is not significantly different from 50%")
-        
-        for item in confidence_items:
-            st.markdown(f"- {item}")
-
-    # Technical notes
-    with st.expander("📝 Technical Notes"):
-        st.markdown("""
-        **Statistical Tests Performed:**
-        - **T-tests**: Test if mean returns are significantly different from zero
-        - **Binomial tests**: Test if win rates are significantly different from 50%
-        - **Information Ratio**: Measures risk-adjusted outperformance
-        
-        **Definitions:**
-        - **Win Rate**: Percentage of days with positive returns
-        - **Outperformance Rate**: Percentage of days InHouse beats Composer
-        - **Information Ratio**: Annualized relative return / relative return volatility
-        - **Statistical Significance**: p-value < 0.05 (95% confidence level)
-        
-        **Data Source**: Yahoo Finance via yfinance library
-        **Assumptions**: Equal weighting within portfolios, daily rebalancing
-        """)
+            st.warning("No strategies selected or no trades generated.")
 
 if __name__ == "__main__":
     main()
